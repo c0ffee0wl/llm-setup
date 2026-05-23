@@ -111,6 +111,9 @@ fi
 
 log "Phase 1: Prerequisites"
 
+log "Refreshing apt index..."
+sudo apt-get update -qq
+
 install_apt_packages git curl jq ca-certificates
 install_or_upgrade_uv
 
@@ -269,6 +272,48 @@ else
 fi
 
 #############################################################################
+# Phase 6: Additional CLI tools
+#############################################################################
+
+log "Phase 6: Additional CLI tools"
+
+# gitingest — Git repo → LLM-friendly text
+if ! command -v gitingest &>/dev/null; then
+    install_or_upgrade_uv_tool gitingest
+elif [ "$UPGRADE_MODE" = "true" ]; then
+    install_or_upgrade_uv_tool gitingest
+else
+    log "gitingest already installed (use --upgrade to refresh)"
+fi
+
+# imagemage — Gemini image-generation CLI (used by the image-generation skill)
+IMAGEMAGE_BIN="$HOME/.local/bin/imagemage"
+NEED_IMAGEMAGE_BUILD=false
+if [ ! -x "$IMAGEMAGE_BIN" ]; then
+    NEED_IMAGEMAGE_BUILD=true
+elif [ "$UPGRADE_MODE" = "true" ]; then
+    NEED_IMAGEMAGE_BUILD=true
+else
+    log "imagemage already installed (use --upgrade to refresh)"
+fi
+
+if [ "$NEED_IMAGEMAGE_BUILD" = "true" ]; then
+    if install_go; then
+        log "Building imagemage from source..."
+        mkdir -p "$(dirname "$IMAGEMAGE_BIN")"
+        IMAGEMAGE_DIR="$(mktemp -d)"
+        trap 'rm -rf "$IMAGEMAGE_DIR"' EXIT
+        git clone --depth 1 https://github.com/c0ffee0wl/imagemage.git "$IMAGEMAGE_DIR"
+        (cd "$IMAGEMAGE_DIR" && go build -o "$IMAGEMAGE_BIN" .)
+        rm -rf "$IMAGEMAGE_DIR"
+        trap - EXIT
+        log "imagemage installed to $IMAGEMAGE_BIN"
+    else
+        warn "Skipping imagemage (Go unavailable). Install Go >= 1.22 and re-run."
+    fi
+fi
+
+#############################################################################
 # Summary
 #############################################################################
 
@@ -277,6 +322,8 @@ log "Setup complete."
 log ""
 log "  llm:        $(command -v llm 2>/dev/null || echo 'not on PATH — open a new shell')"
 log "  claude:     $(command -v claude 2>/dev/null || echo 'not on PATH — open a new shell')"
+log "  gitingest:  $(command -v gitingest 2>/dev/null || echo 'not installed')"
+log "  imagemage:  $([ -x "$HOME/.local/bin/imagemage" ] && echo "$HOME/.local/bin/imagemage" || echo 'not installed')"
 log "  skills:     $HOME/.claude/skills/"
 log "  statusline: $HOME/.claude/statusline.sh"
 log ""

@@ -61,6 +61,8 @@ If `claude` is actively running, setup refuses to proceed (Phase 0 self-update a
 - **Claude Code** via the official `claude.ai/install.sh` installer.
 - **Claude Code skills** copied from this repo's `skills/` to `~/.claude/skills/`. External skills listed in `skills/external-skills.yaml` are refreshed on every run.
 - **Claude Code statusline** at `~/.claude/statusline.sh` (sourced from `/opt/claude-litellm`'s richer LiteLLM-aware variant; degrades gracefully without LiteLLM). `~/.claude/settings.json` is written only on first install — never clobbered.
+- **`gitingest`** (uv tool) — turns a git repo into LLM-friendly text.
+- **`imagemage`** (Go binary at `~/.local/bin/imagemage`) — Gemini image-generation CLI used by the `image-generation` skill. Needs Go ≥ 1.22 (installed from apt if missing); silently skipped if apt can't supply a recent enough Go.
 
 ## What's _not_ installed
 
@@ -79,7 +81,7 @@ llm-setup/
 ├── PLAN.md                  # design rationale
 ├── skills/                  # Claude Code skills (platform-agnostic)
 └── linux/
-    ├── setup.sh             # entry point (5 phases)
+    ├── setup.sh             # entry point (6 phases)
     ├── common.sh            # helper library
     ├── configs/             # Azure model YAML templates
     └── scripts/statusline.sh
