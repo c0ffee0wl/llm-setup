@@ -16,7 +16,8 @@ Entry point: `linux/setup.sh`. It sources `linux/common.sh` for utilities and ru
 
 Flags (not persisted across reruns):
 - `--upgrade` — refresh `llm` (re-installs with `uv tool install --force --with ...`) and run `claude update`.
-- `--yes` / `--no` — non-interactive answers to `ask_yes_no` prompts in `common.sh`. The script itself has no provider prompts; this only matters if helper functions in `common.sh` ever prompt (e.g. apt or rust install nags).
+
+The script is fully non-interactive — it never prompts the user.
 
 The script refuses to run when `pgrep -u "$USER" -x claude` finds an active Claude Code session — Phase 0 self-update and Phase 4 `claude update` can replace the binary mid-session.
 
@@ -25,7 +26,7 @@ The script refuses to run when `pgrep -u "$USER" -x claude` finds an active Clau
 | Phase | What |
 |---|---|
 | 0 | Self-update: `git fetch` + `git pull --ff-only` + `exec "$0" "$@"` if behind. Skipped when not in a git checkout or when no remote is configured. |
-| 1 | apt: `git curl jq ca-certificates poppler-utils`; `install_or_upgrade_uv`; `install_or_upgrade_nodejs` (apt if repo has Node 20+, else nvm Node 22). |
+| 1 | apt: `git curl jq ca-certificates`; `install_or_upgrade_uv` (which also runs `configure_uv_system_python`). No Node.js — Claude Code is now a native binary, and `llm` is pure Python. |
 | 2 | `llm` install (or refresh under `--upgrade`) with the trimmed plugin set, single `uv tool install --force --with ...` invocation. Plugin list lives at the top of Phase 2 in `linux/setup.sh`. |
 | 3 | Seed Azure model YAML templates: copy `linux/configs/extra-openai-models.yaml` and `azure-embeddings-models.yaml` to `~/.config/io.datasette.llm/` only if those files do not already exist. User edits `__AZURE_API_BASE__`; user runs `llm keys set` / `llm models default` themselves. |
 | 4 | Claude Code: official `https://claude.ai/install.sh` curl pipe on first install; `claude update` under `--upgrade`. |
@@ -51,9 +52,10 @@ The script refuses to run when `pgrep -u "$USER" -x claude` finds an active Clau
 
 ## What's intentionally absent
 
-- No `--azure` / `--gemini` flags, no `configure_*` provider functions. Users own provider state.
+- No `--azure` / `--gemini` flags, no `configure_*` provider functions, no `--yes` / `--no` flags. Users own provider state and the script never prompts.
 - No CCR (Claude Code Router) — for Azure-routed Claude Code use [`claude-litellm`](https://github.com/c0ffee0wl/claude-litellm).
 - No `~/.bashrc` / `~/.zshrc` modifications — no `@()` wrapper, no `wut`, no Ctrl+N keybinding, no zsh tab-completion plugin. Skills + statusline at `~/.claude/` don't need shell rc edits.
+- No Node.js install. The `pretty-mermaid` and `last30days` skills need Node at runtime; users install Node + run `npm install` in those skill dirs themselves.
 - No `llm-tools-*` plugins. Add individually post-install if needed (`uv tool install --force --with llm-tools-mcp ... llm`).
 - No `llm` templates. The previous repo's `llm-wut.yaml` required the removed `context` tool. Users who want templates: `llm templates edit <name>`.
 
@@ -61,7 +63,7 @@ The script refuses to run when `pgrep -u "$USER" -x claude` finds an active Clau
 
 ```bash
 bash -n linux/setup.sh && bash -n linux/common.sh        # syntax
-./linux/setup.sh --yes                                   # full first-run, non-interactive
+./linux/setup.sh                                         # full first-run (non-interactive by design)
 llm --version && llm plugins list                        # llm + plugin set
 claude --version                                         # Claude Code
 ls ~/.claude/skills/ && diff <(cat ~/.claude/statusline.sh) linux/scripts/statusline.sh

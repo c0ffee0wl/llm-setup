@@ -15,8 +15,6 @@
 # Usage:
 #   ./linux/setup.sh             # install missing tools, seed configs
 #   ./linux/setup.sh --upgrade   # also upgrade llm + claude code if installed
-#   ./linux/setup.sh --yes       # auto-answer yes to all prompts
-#   ./linux/setup.sh --no        # auto-answer no to all prompts
 #
 
 set -eo pipefail
@@ -39,8 +37,6 @@ Usage: $0 [OPTIONS]
 
 Options:
   --upgrade        Upgrade llm + plugins and Claude Code if already installed
-  --yes, -y        Auto-answer yes to all prompts
-  --no,  -n        Auto-answer no to all prompts
   --help, -h       Show this help and exit
 
 Provider keys, default model, and Azure URLs are NOT configured by this
@@ -56,12 +52,6 @@ while [[ $# -gt 0 ]]; do
     case "$1" in
         --upgrade)
             UPGRADE_MODE=true
-            ;;
-        --yes|-y)
-            YES_MODE=true
-            ;;
-        --no|-n)
-            NO_MODE=true
             ;;
         -h|--help)
             show_usage
@@ -121,9 +111,8 @@ fi
 
 log "Phase 1: Prerequisites"
 
-install_apt_packages git curl jq ca-certificates poppler-utils
+install_apt_packages git curl jq ca-certificates
 install_or_upgrade_uv
-install_or_upgrade_nodejs
 
 #############################################################################
 # Phase 2: llm + trimmed plugin set

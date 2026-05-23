@@ -50,10 +50,8 @@ Re-running `./linux/setup.sh` will never overwrite an existing YAML in `~/.confi
 |---|---|
 | `./linux/setup.sh` | Install missing tools, seed Azure YAML templates if absent |
 | `./linux/setup.sh --upgrade` | Re-install `llm` (refreshes plugins) and run `claude update` |
-| `./linux/setup.sh --yes` / `-y` | Auto-answer yes to prompts |
-| `./linux/setup.sh --no` / `-n` | Auto-answer no to prompts |
 
-Idempotent: re-running is safe. By default tools are install-if-missing only — pass `--upgrade` to refresh.
+Idempotent and non-interactive: re-running is safe; the script never prompts. By default tools are install-if-missing only — pass `--upgrade` to refresh.
 
 If `claude` is actively running, setup refuses to proceed (Phase 0 self-update and `claude update` can swap the binary under a live session). Stop your Claude session, then re-run.
 
@@ -67,6 +65,8 @@ If `claude` is actively running, setup refuses to proceed (Phase 0 self-update a
 ## What's _not_ installed
 
 By design this repo does not ship: the Terminator/inline-`@`/GTK/espanso/Ulauncher AI assistants, Claude Code Router, Codex CLI, asciinema session recording, speech-to-text, custom shell keybindings, or any `~/.bashrc`/`~/.zshrc` modifications. Interactive Azure/Gemini configuration was also removed — you configure keys and models with `llm keys set` and `llm models default` after install.
+
+Node.js and `npm` are not installed by this script. Two of the bundled skills (`pretty-mermaid`, `last30days`) need Node at runtime; if you want to use them, install Node yourself (`apt install nodejs npm` or via `nvm`) and run `npm install` inside the skill's directory under `~/.claude/skills/`.
 
 For Azure-routed Claude Code (LiteLLM gateway), see [claude-litellm](https://github.com/c0ffee0wl/claude-litellm).
 
