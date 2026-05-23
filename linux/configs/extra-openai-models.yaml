@@ -1,0 +1,55 @@
+- model_id: azure/gpt-4.1
+  model_name: gpt-4.1
+  api_base: __AZURE_API_BASE__
+  api_key_name: azure
+  supports_tools: true
+  supports_schema: true
+  vision: true
+
+- model_id: azure/gpt-4.1-mini
+  model_name: gpt-4.1-mini
+  api_base: __AZURE_API_BASE__
+  api_key_name: azure
+  supports_tools: true
+  supports_schema: true
+  vision: true
+
+- model_id: azure/gpt-4.1-nano
+  model_name: gpt-4.1-nano
+  api_base: __AZURE_API_BASE__
+  api_key_name: azure
+  supports_tools: true
+  supports_schema: true
+  vision: true
+
+- model_id: azure/gpt-5.4-mini
+  model_name: gpt-5.4-mini
+  api_base: __AZURE_API_BASE__
+  api_key_name: azure
+  supports_tools: true
+  supports_schema: true
+  vision: true
+
+- model_id: azure/gpt-5.4-nano
+  model_name: gpt-5.4-nano
+  api_base: __AZURE_API_BASE__
+  api_key_name: azure
+  supports_tools: true
+  supports_schema: true
+  vision: true
+
+- model_id: azure/gpt-5.4
+  model_name: gpt-5.4
+  api_base: __AZURE_API_BASE__
+  api_key_name: azure
+  supports_tools: true
+  supports_schema: true
+  vision: true
+
+- model_id: azure/o4-mini
+  model_name: o4-mini
+  api_base: __AZURE_API_BASE__
+  api_key_name: azure
+  supports_tools: true
+  supports_schema: true
+  vision: true

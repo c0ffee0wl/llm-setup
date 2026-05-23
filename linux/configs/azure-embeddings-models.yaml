@@ -1,0 +1,13 @@
+- model_id: azure/text-embedding-3-small
+  model_name: text-embedding-3-small
+  api_base: __AZURE_API_BASE__
+  api_key_name: azure
+  aliases:
+    - azure-3-small
+
+- model_id: azure/text-embedding-3-large
+  model_name: text-embedding-3-large
+  api_base: __AZURE_API_BASE__
+  api_key_name: azure
+  aliases:
+    - azure-3-large
