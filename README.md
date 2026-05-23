@@ -12,38 +12,61 @@ cd ~/llm-setup
 ./linux/setup.sh
 ```
 
-That installs `llm` with a trimmed plugin set, Claude Code, and copies the skills into `~/.claude/skills/`. First run asks if you want to configure Azure OpenAI and/or Google Gemini.
+That installs `llm` with a trimmed plugin set, Claude Code, and copies the skills into `~/.claude/skills/`. Provider configuration (Azure / Gemini keys, default model) is the user's responsibility — see below.
 
-Open a new shell and try:
+## Provider setup
+
+Setup seeds Azure model YAML templates into `~/.config/io.datasette.llm/` on first run. Configure your provider manually:
+
+**Azure OpenAI:**
 
 ```bash
-llm "hi"
-claude
+# 1. Replace __AZURE_API_BASE__ with your resource URL
+#    e.g. https://YOUR-RESOURCE.cognitiveservices.azure.com/openai/v1/
+nano ~/.config/io.datasette.llm/extra-openai-models.yaml
+nano ~/.config/io.datasette.llm/azure-embeddings-models.yaml
+
+# 2. Set your API key
+llm keys set azure
+
+# 3. Set the default model
+llm models default azure/gpt-4.1-mini
 ```
+
+**Google Gemini:**
+
+```bash
+llm keys set gemini
+llm models default gemini-2.5-flash
+```
+
+**Anthropic, OpenRouter, etc.:** likewise, `llm keys set <provider>` then `llm models default <model>`.
+
+Re-running `./linux/setup.sh` will never overwrite an existing YAML in `~/.config/io.datasette.llm/`, so your edits persist.
 
 ## Setup Modes
 
 | Command | What it does |
 |---|---|
-| `./linux/setup.sh` | Install missing tools; first-run provider prompts |
+| `./linux/setup.sh` | Install missing tools, seed Azure YAML templates if absent |
 | `./linux/setup.sh --upgrade` | Re-install `llm` (refreshes plugins) and run `claude update` |
-| `./linux/setup.sh --azure` | (Re)configure Azure OpenAI provider |
-| `./linux/setup.sh --gemini` | (Re)configure Google Gemini provider |
 | `./linux/setup.sh --yes` / `-y` | Auto-answer yes to prompts |
 | `./linux/setup.sh --no` / `-n` | Auto-answer no to prompts |
 
 Idempotent: re-running is safe. By default tools are install-if-missing only — pass `--upgrade` to refresh.
+
+If `claude` is actively running, setup refuses to proceed (Phase 0 self-update and `claude update` can swap the binary under a live session). Stop your Claude session, then re-run.
 
 ## What's installed
 
 - **`llm` CLI** (from the [c0ffee0wl/llm](https://github.com/c0ffee0wl/llm) fork) with: provider plugins (`llm-gemini`, `llm-vertex`, `llm-anthropic`, `llm-openrouter`), `llm-cmd`, `llm-git-commit`, `llm-jq`, `llm-templates-fabric`, fragment loaders (`llm-fragments-github`, `llm-fragments-pdf`, `llm-fragments-site-text`, `llm-fragments-dir`, `llm-fragments-youtube-transcript`), `llm-sort`, `llm-classify`, and `llm-uv-tool` (plugin persistence across `uv tool upgrade`).
 - **Claude Code** via the official `claude.ai/install.sh` installer.
 - **Claude Code skills** copied from this repo's `skills/` to `~/.claude/skills/`. External skills listed in `skills/external-skills.yaml` are refreshed on every run.
-- **Claude Code statusline** at `~/.claude/statusline.sh` (sourced from `/opt/claude-litellm`'s richer LiteLLM-aware variant; degrades gracefully without LiteLLM).
+- **Claude Code statusline** at `~/.claude/statusline.sh` (sourced from `/opt/claude-litellm`'s richer LiteLLM-aware variant; degrades gracefully without LiteLLM). `~/.claude/settings.json` is written only on first install — never clobbered.
 
 ## What's _not_ installed
 
-By design this repo does not ship: the Terminator/inline-`@`/GTK/espanso/Ulauncher AI assistants, Claude Code Router, Codex CLI, asciinema session recording, speech-to-text, custom shell keybindings, or any `~/.bashrc`/`~/.zshrc` modifications. Those lived in the previous `llm-linux-setup` and were pulled out for this lean variant.
+By design this repo does not ship: the Terminator/inline-`@`/GTK/espanso/Ulauncher AI assistants, Claude Code Router, Codex CLI, asciinema session recording, speech-to-text, custom shell keybindings, or any `~/.bashrc`/`~/.zshrc` modifications. Interactive Azure/Gemini configuration was also removed — you configure keys and models with `llm keys set` and `llm models default` after install.
 
 For Azure-routed Claude Code (LiteLLM gateway), see [claude-litellm](https://github.com/c0ffee0wl/claude-litellm).
 

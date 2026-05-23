@@ -8,13 +8,15 @@
 # Runs as the current $USER. Idempotent: install-if-missing by default,
 # upgrade with --upgrade. Self-updates from git on every run.
 #
+# Provider configuration (Azure / Gemini / etc.) is the user's job — see
+# the README. Setup only seeds Azure model YAML templates the first time;
+# never overwrites existing ones.
+#
 # Usage:
-#   ./linux/setup.sh                    # install missing tools, configure on first run
-#   ./linux/setup.sh --upgrade          # also upgrade llm + claude code if installed
-#   ./linux/setup.sh --azure            # (re)configure Azure OpenAI provider
-#   ./linux/setup.sh --gemini           # (re)configure Google Gemini provider
-#   ./linux/setup.sh --yes              # auto-answer yes to all prompts
-#   ./linux/setup.sh --no               # auto-answer no to all prompts
+#   ./linux/setup.sh             # install missing tools, seed configs
+#   ./linux/setup.sh --upgrade   # also upgrade llm + claude code if installed
+#   ./linux/setup.sh --yes       # auto-answer yes to all prompts
+#   ./linux/setup.sh --no        # auto-answer no to all prompts
 #
 
 set -eo pipefail
@@ -30,8 +32,6 @@ source "$SCRIPT_DIR/common.sh"
 
 ORIGINAL_ARGS=("$@")
 UPGRADE_MODE=false
-FORCE_AZURE_CONFIG=false
-FORCE_GEMINI_CONFIG=false
 
 show_usage() {
     cat <<EOF
@@ -39,11 +39,16 @@ Usage: $0 [OPTIONS]
 
 Options:
   --upgrade        Upgrade llm + plugins and Claude Code if already installed
-  --azure          (Re)configure Azure OpenAI provider
-  --gemini         (Re)configure Google Gemini provider
   --yes, -y        Auto-answer yes to all prompts
   --no,  -n        Auto-answer no to all prompts
   --help, -h       Show this help and exit
+
+Provider keys, default model, and Azure URLs are NOT configured by this
+script. After install, edit ~/.config/io.datasette.llm/extra-openai-models.yaml
+(or azure-embeddings-models.yaml) to set your Azure resource URL, then:
+
+    llm keys set azure         # or: llm keys set gemini
+    llm models default azure/gpt-4.1-mini
 EOF
 }
 
@@ -51,12 +56,6 @@ while [[ $# -gt 0 ]]; do
     case "$1" in
         --upgrade)
             UPGRADE_MODE=true
-            ;;
-        --azure)
-            FORCE_AZURE_CONFIG=true
-            ;;
-        --gemini)
-            FORCE_GEMINI_CONFIG=true
             ;;
         --yes|-y)
             YES_MODE=true
@@ -75,126 +74,21 @@ while [[ $# -gt 0 ]]; do
     shift
 done
 
-if [ "$FORCE_AZURE_CONFIG" = "true" ] && [ "$FORCE_GEMINI_CONFIG" = "true" ]; then
-    error "--azure and --gemini cannot be used together"
-fi
-
 if [ "$EUID" -eq 0 ]; then
     error "Do not run this script as root. Run it as your normal user."
 fi
 
 #############################################################################
-# Provider helpers
+# Active-session guard
 #############################################################################
 
-LLM_CONFIG_DIR_DEFAULT="$HOME/.config/io.datasette.llm"
-_LLM_CONFIG_DIR_CACHE=""
-
-get_llm_config_dir() {
-    if [ -z "$_LLM_CONFIG_DIR_CACHE" ]; then
-        local result=""
-        local llm_bin="$HOME/.local/bin/llm"
-        if [ -x "$llm_bin" ]; then
-            result="$("$llm_bin" logs path 2>/dev/null | tail -n1 | xargs dirname 2>/dev/null || true)"
-        fi
-        if [ -z "$result" ]; then
-            result="$(command llm logs path 2>/dev/null | tail -n1 | xargs dirname 2>/dev/null || true)"
-        fi
-        if [ -z "$result" ]; then
-            result="$LLM_CONFIG_DIR_DEFAULT"
-        fi
-        _LLM_CONFIG_DIR_CACHE="$result"
-    fi
-    echo "$_LLM_CONFIG_DIR_CACHE"
-}
-
-# Fetch a stored llm key (empty if missing).
-get_llm_key() {
-    local provider="$1"
-    local llm_cmd="$HOME/.local/bin/llm"
-    [ -x "$llm_cmd" ] || llm_cmd="llm"
-    command -v "$llm_cmd" >/dev/null 2>&1 || { echo ""; return; }
-    "$llm_cmd" keys get "$provider" 2>/dev/null || true
-}
-
-get_azure_api_base() {
-    local extra_models_file="$(get_llm_config_dir)/extra-openai-models.yaml"
-    grep -m 1 "^\s*api_base:" "$extra_models_file" 2>/dev/null \
-        | sed 's/.*api_base:\s*//;s/\s*$//' || true
-}
-
-# Render a config template by substituting __AZURE_API_BASE__ and write to dest.
-render_azure_config() {
-    local src="$1" dest="$2" api_base="$3"
-    local escaped_base
-    # Escape sed special chars in the URL.
-    escaped_base=$(printf '%s' "$api_base" | sed 's/[\&/]/\\&/g')
-    sed "s|__AZURE_API_BASE__|${escaped_base}|g" "$src" > "$dest"
-}
-
-configure_azure_openai() {
-    log "Configuring Azure OpenAI..."
-    echo ""
-    local api_base
-    read -p "Enter your Azure Foundry resource URL (e.g., https://YOUR-RESOURCE.cognitiveservices.azure.com/openai/v1/): " api_base
-
-    [ -z "$api_base" ] && error "Azure API base URL cannot be empty"
-    [[ "$api_base" =~ ^https:// ]] || error "Azure API base URL must start with https://"
-
-    command llm keys set azure
-    if ! command llm keys get azure &>/dev/null; then
-        warn "Azure API key was not set successfully"
-        return 1
-    fi
-
-    local llm_cfg
-    llm_cfg=$(get_llm_config_dir)
-    mkdir -p "$llm_cfg"
-
-    log "Writing $llm_cfg/extra-openai-models.yaml"
-    render_azure_config \
-        "$SCRIPT_DIR/configs/extra-openai-models.yaml" \
-        "$llm_cfg/extra-openai-models.yaml" \
-        "$api_base"
-
-    log "Writing $llm_cfg/azure-embeddings-models.yaml"
-    render_azure_config \
-        "$SCRIPT_DIR/configs/azure-embeddings-models.yaml" \
-        "$llm_cfg/azure-embeddings-models.yaml" \
-        "$api_base"
-
-    # Persist key + resource name to ~/.profile for downstream tools.
-    local resource_name
-    resource_name=$(echo "$api_base" | sed 's|https://\([^.]*\)\..*|\1|')
-    local api_key
-    api_key=$(get_llm_key azure)
-    [ -n "$api_key" ] && update_profile_export "AZURE_OPENAI_API_KEY" "$api_key"
-    [ -n "$resource_name" ] && update_profile_export "AZURE_RESOURCE_NAME" "$resource_name"
-
-    # Set default model on first Azure setup; don't clobber an explicit user choice.
-    local default_model_file="$llm_cfg/default_model.txt"
-    if [ ! -f "$default_model_file" ]; then
-        log "Setting default model to azure/gpt-4.1-mini..."
-        command llm models default azure/gpt-4.1-mini
-    fi
-}
-
-configure_gemini() {
-    log "Configuring Google Gemini..."
-    echo ""
-    echo "Get your free API key from: https://ai.google.dev/gemini-api/docs/api-key"
-    echo ""
-
-    command llm keys set gemini
-    if ! command llm keys get gemini &>/dev/null; then
-        warn "Gemini API key was not set successfully"
-        return 1
-    fi
-
-    local api_key
-    api_key=$(get_llm_key gemini)
-    [ -n "$api_key" ] && update_profile_export "GEMINI_API_KEY" "$api_key"
-}
+# Refuse to run while Claude Code is active: Phase 0 self-update and Phase 4
+# `claude update` can replace the binary mid-session.
+if pgrep -u "$USER" -x claude &>/dev/null; then
+    warn "Claude Code is running — refusing to update tools mid-session."
+    warn "Stop claude (or wait until it exits), then re-run this script."
+    exit 0
+fi
 
 #############################################################################
 # Phase 0: Self-Update
@@ -227,7 +121,7 @@ fi
 
 log "Phase 1: Prerequisites"
 
-install_apt_packages git curl jq ca-certificates build-essential poppler-utils
+install_apt_packages git curl jq ca-certificates poppler-utils
 install_or_upgrade_uv
 install_or_upgrade_nodejs
 
@@ -287,49 +181,28 @@ else
 fi
 
 #############################################################################
-# Phase 3: Provider configuration
+# Phase 3: Seed llm provider config templates
 #############################################################################
+#
+# We only seed the Azure model YAML templates on first run — never overwrite
+# user edits. Provider keys (`llm keys set ...`) and the default model
+# (`llm models default ...`) are the user's responsibility; see README.
 
-log "Phase 3: Provider configuration"
+log "Phase 3: Seed Azure config templates"
 
-HAS_AZURE_KEY=false
-HAS_GEMINI_KEY=false
-[ -n "$(get_llm_key azure)" ] && HAS_AZURE_KEY=true
-[ -n "$(get_llm_key gemini)" ] && HAS_GEMINI_KEY=true
+LLM_CONFIG_DIR="$HOME/.config/io.datasette.llm"
+mkdir -p "$LLM_CONFIG_DIR"
 
-IS_FIRST_PROVIDER_RUN=false
-if [ "$HAS_AZURE_KEY" = "false" ] && [ "$HAS_GEMINI_KEY" = "false" ]; then
-    IS_FIRST_PROVIDER_RUN=true
-fi
-
-# Azure
-if [ "$FORCE_AZURE_CONFIG" = "true" ]; then
-    configure_azure_openai
-elif [ "$HAS_AZURE_KEY" = "true" ]; then
-    log "Azure OpenAI was previously configured (use --azure to reconfigure)"
-elif [ "$IS_FIRST_PROVIDER_RUN" = "true" ]; then
-    if ask_yes_no "Do you want to configure Azure OpenAI?" Y; then
-        configure_azure_openai
+for cfg in extra-openai-models.yaml azure-embeddings-models.yaml; do
+    src="$SCRIPT_DIR/configs/$cfg"
+    dst="$LLM_CONFIG_DIR/$cfg"
+    if [ ! -f "$dst" ]; then
+        cp "$src" "$dst"
+        log "Seeded $dst — edit to set your Azure resource URL"
     else
-        log "Skipping Azure OpenAI configuration"
+        log "$dst exists, leaving untouched"
     fi
-fi
-
-# Refresh after possible Azure configuration
-[ -n "$(get_llm_key azure)" ] && HAS_AZURE_KEY=true
-
-# Gemini
-if [ "$FORCE_GEMINI_CONFIG" = "true" ]; then
-    configure_gemini
-elif [ "$HAS_GEMINI_KEY" = "true" ]; then
-    log "Google Gemini was previously configured (use --gemini to reconfigure)"
-elif [ "$IS_FIRST_PROVIDER_RUN" = "true" ]; then
-    if ask_yes_no "Do you want to configure Google Gemini?" N; then
-        configure_gemini
-    else
-        log "Skipping Google Gemini configuration"
-    fi
-fi
+done
 
 #############################################################################
 # Phase 4: Claude Code
@@ -386,10 +259,10 @@ if command -v claude &>/dev/null || [ -x "$NATIVE_CLAUDE" ]; then
         cp -f "$STATUSLINE_SOURCE" "$STATUSLINE_DEST"
         chmod +x "$STATUSLINE_DEST"
 
+        # Deploy settings.json only on fresh install — never clobber the user's
+        # existing file (it may carry trust, theme, permissions, etc.).
         if [ -f "$SETTINGS_FILE" ]; then
-            jq '.statusLine = {"type": "command", "command": "~/.claude/statusline.sh"}' \
-                "$SETTINGS_FILE" > "${SETTINGS_FILE}.tmp" \
-                && mv "${SETTINGS_FILE}.tmp" "$SETTINGS_FILE"
+            log "$SETTINGS_FILE exists, leaving untouched (add statusLine manually if desired)"
         else
             cat > "$SETTINGS_FILE" <<'SETTINGS_EOF'
 {
@@ -399,6 +272,7 @@ if command -v claude &>/dev/null || [ -x "$NATIVE_CLAUDE" ]; then
   }
 }
 SETTINGS_EOF
+            log "Wrote $SETTINGS_FILE with statusLine pointer"
         fi
     fi
 else
@@ -417,7 +291,9 @@ log "  claude:     $(command -v claude 2>/dev/null || echo 'not on PATH — open
 log "  skills:     $HOME/.claude/skills/"
 log "  statusline: $HOME/.claude/statusline.sh"
 log ""
-[ "$HAS_AZURE_KEY" = "true" ] && log "  Azure key:  configured"
-[ "$HAS_GEMINI_KEY" = "true" ] && log "  Gemini key: configured"
+log "To use Azure or Gemini:"
+log "  1. Edit $LLM_CONFIG_DIR/extra-openai-models.yaml (replace __AZURE_API_BASE__)"
+log "  2. llm keys set azure          # or: llm keys set gemini"
+log "  3. llm models default azure/gpt-4.1-mini"
 log ""
 log "Open a new shell so PATH changes take effect, then try: llm 'hi'"
