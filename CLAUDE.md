@@ -14,12 +14,15 @@ Single execution context: Linux. Runs as the current `$USER`. `sudo` is invoked 
 
 Entry point: `linux/setup.sh`. It sources `linux/common.sh` for utilities and runs six numbered phases (plus Phase 0 self-update).
 
-There is **no `--upgrade` flag**: installed components are upgraded automatically on every run (see "Key Conventions"). The only flag (not persisted across reruns):
+There is **no `--upgrade` flag**: installed components are upgraded automatically on every run (see "Key Conventions"). Flags (none persisted across reruns):
 - `--skip-skills` — skip the Phase 5 skills sync (`update-external-skills.sh` + copying `skills/*/`). The statusline + `settings.json` install still runs.
+- `--clear-cache` — standalone op: run `clear_package_caches` (purge npm/go/pip/pipx/cargo/uv caches) and `exit 0`. Dispatched *before* the active-session guard (it replaces no binaries, so it's safe during a live session).
+- `--uninstall` — standalone op: run `run_uninstall` and `exit 0`. Footprint-scoped (removes only what this script installs); dispatched *after* the session guard (it removes the `claude` binary). Prompts per group unless `--force`.
+- `--dry-run` / `--force` — only valid with `--uninstall` (the script `error`s otherwise, via `if` blocks to stay `set -e`-safe). `--dry-run` previews via `do_or_dry`; `--force` skips the per-group `confirm_uninstall` prompts.
 
-The script is fully non-interactive — it never prompts the user.
+The install/upgrade path is fully non-interactive — it never prompts. **`--uninstall` is the one exception**: it asks `ask_yes_no` per group (default *yes*) unless `--force` is given.
 
-The script refuses to run when `pgrep -u "$USER" -x claude` finds an active Claude Code session — Phase 0 self-update and Phase 4 `claude update` can replace the binary mid-session.
+The script refuses to run when `pgrep -u "$USER" -x claude` finds an active Claude Code session — Phase 0 self-update, Phase 4 `claude update`, and `--uninstall` can replace or remove the binary mid-session. `--clear-cache` is exempt (dispatched before the guard).
 
 ## Setup Phases (`linux/setup.sh`)
 
@@ -33,6 +36,8 @@ The script refuses to run when `pgrep -u "$USER" -x claude` finds an active Clau
 | 5 | Sync top-level `skills/` → `~/.claude/skills/` (calls `skills/update-external-skills.sh` first if present) — skipped under `--skip-skills`; install `linux/scripts/statusline.sh` → `~/.claude/statusline.sh` (always, even with `--skip-skills`); write `~/.claude/settings.json` with a statusLine pointer **only on fresh install** (never overwrite an existing file). |
 | 6 | Additional CLI tools: `gitingest` (via `install_or_upgrade_uv_tool`, auto-upgrades); `imagemage` (Go build of `c0ffee0wl/imagemage` → `~/.local/bin/imagemage`, via `install_go` from apt; skipped with a warning if Go ≥ 1.22 isn't available — **install-if-missing only**); `blaude` (raw script from `c0ffee0wl/blaude` → `~/.local/bin/blaude`, via `install_blaude_repo_script`, re-fetched every run). The repo's `osc52-clipboard` script is deliberately not installed. |
 
+After Phase 6 (before the summary), every normal run calls `clear_package_caches || true` to reclaim disk space — the same routine `--clear-cache` invokes standalone. Ported from `llm-linux-setup`, which ran it "regardless of install mode".
+
 ## Key Conventions
 
 - **Idempotency**: every phase is safe to re-run. The seeded YAML templates, `~/.claude/settings.json`, and any user edits are never clobbered.
@@ -44,7 +49,9 @@ The script refuses to run when `pgrep -u "$USER" -x claude` finds an active Clau
 - **Skills location**: `skills/` lives at the top level, not under `linux/`, because skills are platform-agnostic and a future `windows/` variant would consume the same directory.
 - **Local vs. external skills**: `skills/` mixes two kinds. *Local* skills are committed to this repo (`image-generation`, `youtube-transcript`). *External* skills are vendored from upstream GitHub repos, listed in `skills/external-skills.yaml`, cloned into `skills/<name>/` by `skills/update-external-skills.sh`, and gitignored via `skills/.gitignore` (`humanizer`, `last30days`, `pretty-mermaid`, `smart-illustrator`). Never edit an external skill in place — the next run clobbers it — and never commit it. To add one, append an entry to `external-skills.yaml` (fields: `repo`, optional `ref`/`path`/`old_name` for renames) and run the update script. Phase 5 runs that script, then copies **all** `skills/*/` to `~/.claude/skills/`.
 - **Phase 6 tools are standalone**: `gitingest`, `imagemage`, and `blaude` are independent CLIs — not plugins of `llm`. They use the `install_or_upgrade_uv_tool` / `install_go` / `install_blaude_repo_script` helpers in `common.sh`. `imagemage` is required by the `image-generation` skill; without it the skill is non-functional. `blaude` needs `bwrap` (apt `bubblewrap`, Phase 1) at runtime or it exits with an error.
-- **`configure_bwrap_apparmor` is the only non-apt sudo**: it writes `/etc/apparmor.d/bwrap` + reloads it, but only when `apparmor_restrict_unprivileged_userns=1` and the profile is absent (idempotent). Ported verbatim from `llm-linux-setup`.
+- **`configure_bwrap_apparmor` is the only non-apt sudo on the install path**: it writes `/etc/apparmor.d/bwrap` + reloads it, but only when `apparmor_restrict_unprivileged_userns=1` and the profile is absent (idempotent). Ported verbatim from `llm-linux-setup`. (`--uninstall` also sudo-removes that profile.)
+- **Cache cleanup runs every run**: `clear_package_caches` (in `common.sh`) purges npm/go/pip/pipx/cargo/uv caches, each guarded by `command -v` so it's safe regardless of which package managers exist — that's why it covers cargo/npm even though this repo installs neither. Invoked at the end of every normal run (`|| true`) and standalone via `--clear-cache`.
+- **`--uninstall` is footprint-scoped**: `run_uninstall` (in `setup.sh`, since it's footprint-specific) removes only what this script installs — `llm`+plugins and `gitingest` (`uninstall_uv_tool`), `~/.local/bin/{claude,imagemage,blaude}`, this repo's managed skills under `~/.claude/skills/` + `statusline.sh`, the Phase 2 state files, and the AppArmor `bwrap` profile. It **preserves** user data: keys/default-model/seeded YAML in `~/.config/io.datasette.llm/`, `~/.config/uv/uv.toml`, and a user-modified `~/.claude/settings.json` (removed only if byte-identical to `settings_template`, the shared definition Phase 5 also writes). Generic helpers (`ask_yes_no`, `do_or_dry`, `confirm_uninstall`, `uninstall_uv_tool`) live in `common.sh`.
 
 ## Important Paths
 
@@ -57,7 +64,7 @@ The script refuses to run when `pgrep -u "$USER" -x claude` finds an active Clau
 
 ## What's intentionally absent
 
-- No `--azure` / `--gemini` flags, no `configure_*` provider functions, no `--yes` / `--no` / `--upgrade` flags. Users own provider state and the script never prompts; upgrades are automatic.
+- No `--azure` / `--gemini` flags, no `configure_*` provider functions, no `--yes` / `--no` / `--upgrade` flags. Users own provider state and the install path never prompts; upgrades are automatic. (`--uninstall` / `--clear-cache` / `--dry-run` / `--force` *do* exist — for removal and cache cleanup, not provider config.)
 - No `osc52-clipboard`: the `c0ffee0wl/blaude` repo also ships an OSC 52 clipboard PTY proxy for VTE terminals — we install `blaude` only, not that script.
 - No CCR (Claude Code Router) — for Azure-routed Claude Code use [`claude-litellm`](https://github.com/c0ffee0wl/claude-litellm).
 - No `~/.bashrc` / `~/.zshrc` modifications — no `@()` wrapper, no `wut`, no Ctrl+N keybinding, no zsh tab-completion plugin. Skills + statusline at `~/.claude/` don't need shell rc edits.
@@ -83,4 +90,8 @@ ls ~/.local/bin/osc52-clipboard 2>/dev/null && echo BAD  # should be absent (osc
 ls ~/.claude/skills/ && diff <(cat ~/.claude/statusline.sh) linux/scripts/statusline.sh
 ls ~/.config/io.datasette.llm/{extra-openai-models.yaml,llm-install-fingerprint,uv-tool-packages.json}
 ./linux/setup.sh                                         # re-run: auto-upgrades, fingerprint unchanged → fast `uv tool upgrade`, no clobbering
+./linux/setup.sh --clear-cache                           # standalone cache purge, exits 0
+./linux/setup.sh --uninstall --dry-run                   # preview removals, change nothing
+./linux/setup.sh --force                                 # must error: --force only valid with --uninstall
+./linux/setup.sh --uninstall --force                     # remove footprint; user data in ~/.config/io.datasette.llm preserved
 ```

@@ -312,3 +312,117 @@ install_blaude_repo_script() {
         warn "Failed to download $name"
     fi
 }
+
+#############################################################################
+# Cache cleanup
+#############################################################################
+
+# Clear package-manager caches to reclaim disk space. Each cleaner is guarded by
+# `command -v`, so this is safe to run regardless of which package managers exist
+# on the box — it purges npm/go/pip/pipx/cargo/uv caches if (and only if) present.
+# Invoked by `--clear-cache` and automatically at the end of every normal run.
+clear_package_caches() {
+    log "Clearing package manager caches..."
+
+    # npm cache (~/.npm/_cacache)
+    if command -v npm &>/dev/null; then
+        log "Clearing npm cache..."
+        npm cache clean --force 2>/dev/null || warn "npm cache clean failed"
+    fi
+
+    # Go module cache (~/go/pkg/mod)
+    if command -v go &>/dev/null; then
+        log "Clearing Go module cache..."
+        go clean -modcache 2>/dev/null || warn "go clean -modcache failed"
+    fi
+
+    # pip cache (~/.cache/pip) — use `python3 -m pip` so it works even if only pip3 exists.
+    if python3 -m pip --version &>/dev/null; then
+        log "Clearing pip cache..."
+        python3 -m pip cache purge 2>/dev/null || warn "pip cache purge failed"
+    fi
+
+    # pipx cache (~/.cache/pipx) — no built-in purge command yet.
+    if command -v pipx &>/dev/null && [ -d "$HOME/.cache/pipx" ]; then
+        log "Clearing pipx cache..."
+        rm -rf "$HOME/.cache/pipx" 2>/dev/null || warn "pipx cache removal failed"
+    fi
+
+    # cargo cache (~/.cargo/registry, ~/.cargo/git) — `cargo clean gc` is still
+    # nightly-only, so remove the cache dirs manually (works on all toolchains).
+    if command -v cargo &>/dev/null; then
+        log "Clearing cargo cache..."
+        rm -rf "$HOME/.cargo/registry/cache" "$HOME/.cargo/registry/src" "$HOME/.cargo/git/checkouts" 2>/dev/null || warn "cargo cache removal failed"
+    fi
+
+    # uv cache
+    if command -v uv &>/dev/null; then
+        log "Clearing uv cache..."
+        uv cache clean 2>/dev/null || warn "uv cache clean failed"
+    fi
+
+    log "Cache cleanup complete!"
+}
+
+#############################################################################
+# Uninstall helpers
+#############################################################################
+
+# Prompt the user with a yes/no question; return 0 for yes, 1 for no.
+# Usage: if ask_yes_no "Remove foo?" Y; then ...; fi
+ask_yes_no() {
+    local prompt="$1"
+    local default="${2:-Y}"
+    local hint response
+
+    if [[ "$default" =~ ^[Yy] ]]; then
+        hint="(Y/n)"
+    else
+        hint="(y/N)"
+    fi
+
+    read -p "$prompt $hint: " response
+    response=${response:-$default}
+    [[ "$response" =~ ^[Yy] ]]
+}
+
+# Run a destructive command, or merely describe it under DRY_RUN.
+# Usage: do_or_dry "<description>" <command...>
+do_or_dry() {
+    local description="$1"; shift
+    if [ "${DRY_RUN:-false}" = "true" ]; then
+        log "[dry-run] $description"
+        return 0
+    fi
+    log "$description"
+    "$@"
+}
+
+# Prompt before uninstalling a group; auto-yes when FORCE_UNINSTALL=true.
+# Returns 0 to proceed, 1 to skip. Records skipped groups in UNINSTALL_SKIPPED.
+# Usage: if confirm_uninstall "Systemd user services"; then ...; fi
+confirm_uninstall() {
+    local label="$1"
+    if [ "${FORCE_UNINSTALL:-false}" = "true" ]; then
+        log "Uninstalling: $label"
+        return 0
+    fi
+    if ask_yes_no "Uninstall $label?" Y; then
+        return 0
+    fi
+    UNINSTALL_SKIPPED+=("$label")
+    log "Skipped: $label"
+    return 1
+}
+
+# Uninstall a uv tool if present. No-op if uv is missing or the tool isn't listed.
+# Usage: uninstall_uv_tool <tool_name>
+uninstall_uv_tool() {
+    local tool="$1"
+    if ! command -v uv >/dev/null 2>&1; then
+        return 0
+    fi
+    if uv tool list 2>/dev/null | grep -qE "^${tool}( |$)"; then
+        do_or_dry "uv tool uninstall $tool" uv tool uninstall "$tool" || warn "uv tool uninstall $tool failed"
+    fi
+}

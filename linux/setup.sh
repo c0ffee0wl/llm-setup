@@ -13,8 +13,14 @@
 # never overwrites existing ones.
 #
 # Usage:
-#   ./linux/setup.sh                # install missing tools + upgrade installed ones
-#   ./linux/setup.sh --skip-skills  # same, but skip the skills sync
+#   ./linux/setup.sh                  # install missing tools + upgrade installed ones
+#   ./linux/setup.sh --skip-skills    # same, but skip the skills sync
+#   ./linux/setup.sh --clear-cache    # purge package-manager caches and exit
+#   ./linux/setup.sh --uninstall      # remove what this script installed (prompts per group)
+#   ./linux/setup.sh --uninstall --dry-run   # preview the uninstall without changing anything
+#   ./linux/setup.sh --uninstall --force     # uninstall everything without prompts
+#
+# Every normal run also purges package-manager caches at the end.
 #
 
 set -eo pipefail
@@ -30,16 +36,25 @@ source "$SCRIPT_DIR/common.sh"
 
 ORIGINAL_ARGS=("$@")
 SKIP_SKILLS=false
+UNINSTALL=false
+CLEAR_CACHE=false
+DRY_RUN=false
+FORCE_UNINSTALL=false
 
 show_usage() {
     cat <<EOF
 Usage: $0 [OPTIONS]
 
 Installed components (llm + plugins, Claude Code, gitingest) are upgraded
-automatically on every run — there is no separate --upgrade flag.
+automatically on every run — there is no separate --upgrade flag. Every normal
+run also purges package-manager caches at the end.
 
 Options:
   --skip-skills    Skip the skills sync (statusline is still installed)
+  --clear-cache    Purge package-manager caches (npm, go, pip, pipx, cargo, uv) and exit
+  --uninstall      Remove what this script installed (prompts per group; keeps user data)
+  --dry-run        With --uninstall: show what would be removed without changing anything
+  --force          With --uninstall: skip per-group prompts and remove everything
   --help, -h       Show this help and exit
 
 Provider keys, default model, and Azure URLs are NOT configured by this
@@ -55,6 +70,18 @@ while [[ $# -gt 0 ]]; do
     case "$1" in
         --skip-skills)
             SKIP_SKILLS=true
+            ;;
+        --clear-cache)
+            CLEAR_CACHE=true
+            ;;
+        --uninstall)
+            UNINSTALL=true
+            ;;
+        --dry-run)
+            DRY_RUN=true
+            ;;
+        --force)
+            FORCE_UNINSTALL=true
             ;;
         -h|--help)
             show_usage
@@ -72,14 +99,216 @@ if [ "$EUID" -eq 0 ]; then
 fi
 
 #############################################################################
+# Shared definitions used by both install and uninstall
+#############################################################################
+
+# The settings.json we deploy on a fresh install (Phase 5). Defined once so the
+# uninstall path can recognise an unmodified file and remove only that.
+settings_template() {
+    cat <<'SETTINGS_EOF'
+{
+  "statusLine": {
+    "type": "command",
+    "command": "~/.claude/statusline.sh"
+  }
+}
+SETTINGS_EOF
+}
+
+#############################################################################
+# Uninstall (footprint-scoped: removes only what this script installs)
+#############################################################################
+
+# Remove what this script installed. User data (API keys, default model, seeded
+# Azure YAML), uv/uv.toml, a user-modified settings.json, apt packages, and
+# runtimes (uv, pipx, go) are preserved. Honors DRY_RUN and FORCE_UNINSTALL.
+run_uninstall() {
+    UNINSTALL_SKIPPED=()
+    local removed_anything=false
+    local llm_config_dir="$HOME/.config/io.datasette.llm"
+
+    log "llm-setup Uninstall"
+    if [ "$DRY_RUN" = "true" ]; then
+        log "Mode: DRY RUN — nothing will be changed"
+    fi
+    if [ "$FORCE_UNINSTALL" = "true" ]; then
+        log "Mode: --force — no per-group prompts"
+    fi
+    echo ""
+    log "User data is preserved (~/.config/io.datasette.llm keys/default model/seeded YAML,"
+    log "~/.config/uv/uv.toml, a customised ~/.claude/settings.json). System apt packages and"
+    log "runtimes (uv, pipx, go) are NOT removed."
+    echo ""
+
+    # 1. llm core + all plugins (single uv tool — removing llm drops the whole env),
+    #    together with the install-state files that only describe that env. Kept in one
+    #    group so a "keep llm" choice never strands llm-uv-tool's plugin manifest — a
+    #    later run reads uv-tool-packages.json to preserve user-installed plugins.
+    if confirm_uninstall "LLM core tool, all installed plugins (uv tool 'llm'), and its install state"; then
+        uninstall_uv_tool llm
+        local state
+        for state in llm-install-fingerprint uv-tool-packages.json; do
+            if [ -f "$llm_config_dir/$state" ]; then
+                do_or_dry "rm $llm_config_dir/$state" rm -f "$llm_config_dir/$state" \
+                    || warn "Failed to remove $llm_config_dir/$state"
+            fi
+        done
+        removed_anything=true
+    fi
+
+    # 2. gitingest (the other uv tool this script installs)
+    if confirm_uninstall "gitingest (uv tool)"; then
+        uninstall_uv_tool gitingest
+        removed_anything=true
+    fi
+
+    # 3. Claude Code native binary
+    if confirm_uninstall "Claude Code native binary (~/.local/bin/claude)"; then
+        if [ -f "$HOME/.local/bin/claude" ]; then
+            do_or_dry "rm ~/.local/bin/claude" rm -f "$HOME/.local/bin/claude" \
+                || warn "Failed to remove ~/.local/bin/claude (in use? try again from another shell)"
+        fi
+        removed_anything=true
+    fi
+
+    # 4. CLI binaries this script drops in ~/.local/bin
+    if confirm_uninstall "CLI binaries (~/.local/bin/{imagemage,blaude})"; then
+        local bin
+        for bin in imagemage blaude; do
+            if [ -f "$HOME/.local/bin/$bin" ] || [ -L "$HOME/.local/bin/$bin" ]; then
+                do_or_dry "rm ~/.local/bin/$bin" rm -f "$HOME/.local/bin/$bin" \
+                    || warn "Failed to remove ~/.local/bin/$bin"
+            fi
+        done
+        removed_anything=true
+    fi
+
+    # 5. Claude Code skills + statusline. Remove every skill this repo manages:
+    #    committed local dirs PLUS the external-skills.yaml entries (and their
+    #    `old_name` migration targets), so externals aren't orphaned when uninstalling
+    #    from a checkout that never fetched them into skills/.
+    if confirm_uninstall "Claude Code skills + statusline (~/.claude/skills/<managed>, ~/.claude/statusline.sh)"; then
+        local manifest="$REPO_DIR/skills/external-skills.yaml"
+        local -A managed_skills=()
+        local name dest skill_dir
+        if [ -d "$REPO_DIR/skills" ]; then
+            for skill_dir in "$REPO_DIR"/skills/*/; do
+                [ -d "$skill_dir" ] || continue
+                managed_skills["$(basename "$skill_dir")"]=1
+            done
+        fi
+        if [ -f "$manifest" ]; then
+            # Pull `name:` / `old_name:` values without needing a YAML parser at
+            # uninstall time. Comment lines start with `#`, so they don't match.
+            while IFS= read -r name; do
+                [ -n "$name" ] && managed_skills["$name"]=1
+            done < <(grep -oE '^[[:space:]]*(-[[:space:]]+)?(name|old_name):[[:space:]]*[^[:space:]]+' "$manifest" 2>/dev/null \
+                        | sed -E 's/.*:[[:space:]]*//')
+        fi
+        for name in "${!managed_skills[@]}"; do
+            dest="$HOME/.claude/skills/$name"
+            if [ -d "$dest" ]; then
+                do_or_dry "rm -rf $dest" rm -rf "$dest" || warn "Failed to remove $dest"
+            fi
+        done
+        if [ -f "$HOME/.claude/statusline.sh" ]; then
+            do_or_dry "rm ~/.claude/statusline.sh" rm -f "$HOME/.claude/statusline.sh" \
+                || warn "Failed to remove ~/.claude/statusline.sh"
+        fi
+        # settings.json — remove only if byte-identical to our fresh-install template
+        # (it may carry the user's trust/theme/permissions otherwise).
+        local settings_file="$HOME/.claude/settings.json"
+        if [ -f "$settings_file" ]; then
+            if diff -q <(settings_template) "$settings_file" >/dev/null 2>&1; then
+                do_or_dry "rm ~/.claude/settings.json" rm -f "$settings_file" \
+                    || warn "Failed to remove $settings_file"
+            else
+                warn "Keeping $settings_file — appears user-modified"
+            fi
+        fi
+        removed_anything=true
+    fi
+
+    # 6. AppArmor bwrap profile (the only thing this script writes outside $HOME; sudo).
+    #    Unload from the kernel BEFORE deleting the file: `apparmor_parser -R` reads the
+    #    named profile to learn what to unload, so the file must still exist at that point.
+    if confirm_uninstall "AppArmor bwrap profile (/etc/apparmor.d/bwrap — requires sudo)"; then
+        if [ -f /etc/apparmor.d/bwrap ]; then
+            if command -v apparmor_parser >/dev/null 2>&1; then
+                do_or_dry "sudo apparmor_parser -R /etc/apparmor.d/bwrap" \
+                    bash -c 'sudo apparmor_parser -R /etc/apparmor.d/bwrap 2>/dev/null || true'
+            fi
+            do_or_dry "sudo rm /etc/apparmor.d/bwrap" sudo rm -f /etc/apparmor.d/bwrap \
+                || warn "Failed to remove /etc/apparmor.d/bwrap"
+        fi
+        removed_anything=true
+    fi
+
+    # Final report
+    echo ""
+    if [ "$DRY_RUN" = "true" ]; then
+        log "Dry run complete. No changes were made."
+    elif [ "$removed_anything" = "true" ]; then
+        log "Uninstall complete."
+    else
+        log "Nothing to uninstall (or all groups skipped)."
+    fi
+
+    if [ "${#UNINSTALL_SKIPPED[@]}" -gt 0 ]; then
+        echo ""
+        log "Skipped groups (kept on system):"
+        local s
+        for s in "${UNINSTALL_SKIPPED[@]}"; do
+            echo "  - $s"
+        done
+    fi
+
+    echo ""
+    log "Preserved (not touched by --uninstall):"
+    echo "  - ~/.config/io.datasette.llm/   (keys.json, default_model.txt, seeded Azure YAML)"
+    echo "  - ~/.config/uv/uv.toml          (python-preference)"
+    echo "  - ~/.claude/settings.json       (when user-modified)"
+    echo "  - System apt packages (git curl jq bubblewrap) and runtimes (uv, pipx, go)"
+}
+
+#############################################################################
+# Standalone ops: --clear-cache / --uninstall
+#############################################################################
+
+# --clear-cache is a standalone utility op (no binary replacement), so it is safe
+# during a live Claude Code session — run it before the session guard and exit.
+if [ "$CLEAR_CACHE" = true ]; then
+    clear_package_caches
+    exit 0
+fi
+
+# --force / --dry-run only make sense alongside --uninstall. Use `if` blocks (not
+# `&&`) so a false test isn't the script's exit status under `set -eo pipefail`.
+if [ "$UNINSTALL" != true ]; then
+    if [ "$FORCE_UNINSTALL" = true ]; then
+        error "--force only applies to --uninstall. Use --uninstall --force to remove everything without prompts."
+    fi
+    if [ "$DRY_RUN" = true ]; then
+        error "--dry-run only applies to --uninstall."
+    fi
+fi
+
+#############################################################################
 # Active-session guard
 #############################################################################
 
-# Refuse to run while Claude Code is active: Phase 0 self-update and Phase 4
-# `claude update` can replace the binary mid-session.
+# Refuse to run while Claude Code is active: Phase 0 self-update, Phase 4
+# `claude update`, and --uninstall can replace or remove the binary mid-session.
 if pgrep -u "$USER" -x claude &>/dev/null; then
-    warn "Claude Code is running — refusing to update tools mid-session."
+    warn "Claude Code is running — refusing to update or remove tools mid-session."
     warn "Stop claude (or wait until it exits), then re-run this script."
+    exit 0
+fi
+
+# --uninstall removes the claude binary, so it runs after the session guard.
+# Standalone op — run and exit before any install / self-update work.
+if [ "$UNINSTALL" = true ]; then
+    run_uninstall
     exit 0
 fi
 
@@ -331,14 +560,7 @@ if command -v claude &>/dev/null || [ -x "$NATIVE_CLAUDE" ]; then
         if [ -f "$SETTINGS_FILE" ]; then
             log "$SETTINGS_FILE exists, leaving untouched (add statusLine manually if desired)"
         else
-            cat > "$SETTINGS_FILE" <<'SETTINGS_EOF'
-{
-  "statusLine": {
-    "type": "command",
-    "command": "~/.claude/statusline.sh"
-  }
-}
-SETTINGS_EOF
+            settings_template > "$SETTINGS_FILE"
             log "Wrote $SETTINGS_FILE with statusLine pointer"
         fi
     fi
@@ -380,6 +602,14 @@ fi
 # same repo is intentionally NOT installed.
 mkdir -p "$HOME/.local/bin"
 install_blaude_repo_script blaude
+
+#############################################################################
+# Reclaim disk space
+#############################################################################
+
+# Purge package-manager caches at the end of every run (mirrors llm-linux-setup).
+# Non-fatal: a cache hiccup must never fail an otherwise-successful setup.
+clear_package_caches || true
 
 #############################################################################
 # Summary

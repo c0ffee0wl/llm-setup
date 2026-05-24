@@ -50,10 +50,25 @@ Re-running `./linux/setup.sh` will never overwrite an existing YAML in `~/.confi
 |---|---|
 | `./linux/setup.sh` | Install missing tools, upgrade already-installed ones, seed Azure YAML templates if absent |
 | `./linux/setup.sh --skip-skills` | Same, but skip the skills sync (statusline still installed) |
+| `./linux/setup.sh --clear-cache` | Purge package-manager caches (npm, go, pip, pipx, cargo, uv) and exit |
+| `./linux/setup.sh --uninstall` | Remove what this script installed (prompts per group; keeps user data) |
+| `./linux/setup.sh --uninstall --dry-run` | Preview the uninstall — list every action, change nothing |
+| `./linux/setup.sh --uninstall --force` | Uninstall everything without per-group prompts |
 
-Idempotent and non-interactive: re-running is safe; the script never prompts. There is **no `--upgrade` flag** — installed components (`llm` + plugins, Claude Code, `gitingest`) are upgraded automatically on every run. `llm` is fully reinstalled only when its plugin list changes (tracked by a fingerprint); otherwise it gets a fast `uv tool upgrade`. `imagemage` is install-if-missing only (no per-run Go rebuild).
+The install/upgrade run is idempotent and non-interactive: re-running is safe; the script never prompts. There is **no `--upgrade` flag** — installed components (`llm` + plugins, Claude Code, `gitingest`) are upgraded automatically on every run. `llm` is fully reinstalled only when its plugin list changes (tracked by a fingerprint); otherwise it gets a fast `uv tool upgrade`. `imagemage` is install-if-missing only (no per-run Go rebuild). Every normal run also purges package-manager caches at the end (same as a standalone `--clear-cache`).
 
-If `claude` is actively running, setup refuses to proceed (Phase 0 self-update and `claude update` can swap the binary under a live session). Stop your Claude session, then re-run.
+If `claude` is actively running, setup refuses to proceed (Phase 0 self-update, `claude update`, and `--uninstall` can swap or remove the binary under a live session). Stop your Claude session, then re-run. `--clear-cache` is exempt — it changes no binaries and works during a session.
+
+### Uninstall
+
+`--uninstall` removes only what this script installs, one group at a time (answer `Y`/`n` per group, or pass `--force` to remove all without asking; `--dry-run` previews):
+
+- `llm` + all its plugins (the `llm` uv tool), together with its install-state files (`llm-install-fingerprint`, `uv-tool-packages.json`) — bundled so that *keeping* `llm` keeps its plugin manifest intact — and `gitingest`
+- the Claude Code binary (`~/.local/bin/claude`) and `~/.local/bin/{imagemage,blaude}`
+- this repo's skills under `~/.claude/skills/` (local **and** external ones listed in `skills/external-skills.yaml`) and `~/.claude/statusline.sh`
+- the AppArmor `bwrap` profile (`/etc/apparmor.d/bwrap`, via sudo — unloaded from the kernel, then removed)
+
+**Preserved:** your API keys, default model, and seeded Azure YAML in `~/.config/io.datasette.llm/`; `~/.config/uv/uv.toml`; a customised `~/.claude/settings.json` (removed only if byte-identical to the fresh-install template); system apt packages (`git curl jq bubblewrap`) and runtimes (`uv`, `pipx`, `go`).
 
 ## What's installed
 
