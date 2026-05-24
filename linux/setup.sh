@@ -30,6 +30,7 @@ source "$SCRIPT_DIR/common.sh"
 
 ORIGINAL_ARGS=("$@")
 UPGRADE_MODE=false
+SKIP_SKILLS=false
 
 show_usage() {
     cat <<EOF
@@ -37,6 +38,7 @@ Usage: $0 [OPTIONS]
 
 Options:
   --upgrade        Upgrade llm + plugins and Claude Code if already installed
+  --skip-skills    Skip the skills sync (statusline is still installed)
   --help, -h       Show this help and exit
 
 Provider keys, default model, and Azure URLs are NOT configured by this
@@ -52,6 +54,9 @@ while [[ $# -gt 0 ]]; do
     case "$1" in
         --upgrade)
             UPGRADE_MODE=true
+            ;;
+        --skip-skills)
+            SKIP_SKILLS=true
             ;;
         -h|--help)
             show_usage
@@ -222,23 +227,27 @@ fi
 log "Phase 5: Skills + statusline"
 
 if command -v claude &>/dev/null || [ -x "$NATIVE_CLAUDE" ]; then
-    SKILLS_SOURCE_DIR="$REPO_DIR/skills"
-    SKILLS_DEST_DIR="$HOME/.claude/skills"
+    if [ "$SKIP_SKILLS" = "true" ]; then
+        log "Skipping skills sync (--skip-skills)"
+    else
+        SKILLS_SOURCE_DIR="$REPO_DIR/skills"
+        SKILLS_DEST_DIR="$HOME/.claude/skills"
 
-    if [ -x "$SKILLS_SOURCE_DIR/update-external-skills.sh" ]; then
-        log "Refreshing external skills..."
-        "$SKILLS_SOURCE_DIR/update-external-skills.sh" || warn "External skills refresh failed, continuing..."
-    fi
+        if [ -x "$SKILLS_SOURCE_DIR/update-external-skills.sh" ]; then
+            log "Refreshing external skills..."
+            "$SKILLS_SOURCE_DIR/update-external-skills.sh" || warn "External skills refresh failed, continuing..."
+        fi
 
-    if [ -d "$SKILLS_SOURCE_DIR" ]; then
-        log "Syncing skills to $SKILLS_DEST_DIR"
-        mkdir -p "$SKILLS_DEST_DIR"
-        for skill_dir in "$SKILLS_SOURCE_DIR"/*/; do
-            [ -d "$skill_dir" ] || continue
-            skill_name=$(basename "$skill_dir")
-            log "  $skill_name"
-            cp -rf "$skill_dir" "$SKILLS_DEST_DIR/"
-        done
+        if [ -d "$SKILLS_SOURCE_DIR" ]; then
+            log "Syncing skills to $SKILLS_DEST_DIR"
+            mkdir -p "$SKILLS_DEST_DIR"
+            for skill_dir in "$SKILLS_SOURCE_DIR"/*/; do
+                [ -d "$skill_dir" ] || continue
+                skill_name=$(basename "$skill_dir")
+                log "  $skill_name"
+                cp -rf "$skill_dir" "$SKILLS_DEST_DIR/"
+            done
+        fi
     fi
 
     STATUSLINE_SOURCE="$SCRIPT_DIR/scripts/statusline.sh"

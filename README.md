@@ -50,6 +50,9 @@ Re-running `./linux/setup.sh` will never overwrite an existing YAML in `~/.confi
 |---|---|
 | `./linux/setup.sh` | Install missing tools, seed Azure YAML templates if absent |
 | `./linux/setup.sh --upgrade` | Re-install `llm` (refreshes plugins) and run `claude update` |
+| `./linux/setup.sh --skip-skills` | Install/seed everything except the skills sync (statusline still installed) |
+
+`--skip-skills` and `--upgrade` can be combined.
 
 Idempotent and non-interactive: re-running is safe; the script never prompts. By default tools are install-if-missing only — pass `--upgrade` to refresh.
 

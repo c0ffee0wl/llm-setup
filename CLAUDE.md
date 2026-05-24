@@ -1,6 +1,6 @@
 # CLAUDE.md
 
-Guidance for Claude Code (claude.ai/code) when working in this repository.
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
 ## Project Overview
 
@@ -16,6 +16,7 @@ Entry point: `linux/setup.sh`. It sources `linux/common.sh` for utilities and ru
 
 Flags (not persisted across reruns):
 - `--upgrade` — refresh `llm` (re-installs with `uv tool install --force --with ...`) and run `claude update`.
+- `--skip-skills` — skip the Phase 5 skills sync (`update-external-skills.sh` + copying `skills/*/`). The statusline + `settings.json` install still runs. Combinable with `--upgrade`.
 
 The script is fully non-interactive — it never prompts the user.
 
@@ -30,7 +31,7 @@ The script refuses to run when `pgrep -u "$USER" -x claude` finds an active Clau
 | 2 | `llm` install (or refresh under `--upgrade`) with the trimmed plugin set, single `uv tool install --force --with ...` invocation. Plugin list lives at the top of Phase 2 in `linux/setup.sh`. |
 | 3 | Seed Azure model YAML templates: copy `linux/configs/extra-openai-models.yaml` and `azure-embeddings-models.yaml` to `~/.config/io.datasette.llm/` only if those files do not already exist. User edits `__AZURE_API_BASE__`; user runs `llm keys set` / `llm models default` themselves. |
 | 4 | Claude Code: official `https://claude.ai/install.sh` curl pipe on first install; `claude update` under `--upgrade`. |
-| 5 | Sync top-level `skills/` → `~/.claude/skills/` (calls `skills/update-external-skills.sh` first if present); install `linux/scripts/statusline.sh` → `~/.claude/statusline.sh`; write `~/.claude/settings.json` with a statusLine pointer **only on fresh install** (never overwrite an existing file). |
+| 5 | Sync top-level `skills/` → `~/.claude/skills/` (calls `skills/update-external-skills.sh` first if present) — skipped under `--skip-skills`; install `linux/scripts/statusline.sh` → `~/.claude/statusline.sh` (always, even with `--skip-skills`); write `~/.claude/settings.json` with a statusLine pointer **only on fresh install** (never overwrite an existing file). |
 | 6 | Additional CLI tools: `gitingest` (via `install_or_upgrade_uv_tool`) and `imagemage` (Go build of `c0ffee0wl/imagemage` → `~/.local/bin/imagemage`, via `install_go` from apt; skipped with a warning if Go ≥ 1.22 isn't available). Install-if-missing by default; `--upgrade` refreshes both. |
 
 ## Key Conventions
@@ -42,6 +43,7 @@ The script refuses to run when `pgrep -u "$USER" -x claude` finds an active Clau
 - **Plugin list**: a single `REMOTE_PLUGINS=( ... )` array in Phase 2 of `linux/setup.sh` is the only source of truth. `llm-uv-tool` (c0ffee0wl fork) must be first so plugins persist across `uv tool upgrade llm`.
 - **`llm` is a fork**: installed from `git+https://github.com/c0ffee0wl/llm` (markdown rendering enhancements). To revert to upstream, change `LLM_SOURCE` at the top of Phase 2.
 - **Skills location**: `skills/` lives at the top level, not under `linux/`, because skills are platform-agnostic and a future `windows/` variant would consume the same directory.
+- **Local vs. external skills**: `skills/` mixes two kinds. *Local* skills are committed to this repo (`image-generation`, `youtube-transcript`). *External* skills are vendored from upstream GitHub repos, listed in `skills/external-skills.yaml`, cloned into `skills/<name>/` by `skills/update-external-skills.sh`, and gitignored via `skills/.gitignore` (`humanizer`, `last30days`, `pretty-mermaid`, `smart-illustrator`). Never edit an external skill in place — the next run clobbers it — and never commit it. To add one, append an entry to `external-skills.yaml` (fields: `repo`, optional `ref`/`path`/`old_name` for renames) and run the update script. Phase 5 runs that script, then copies **all** `skills/*/` to `~/.claude/skills/`.
 - **Phase 6 tools are standalone**: `gitingest` and `imagemage` are independent CLIs — not plugins of `llm`. They use the `install_or_upgrade_uv_tool` / `install_go` helpers in `common.sh`. `imagemage` is required by the `image-generation` skill; without it the skill is non-functional.
 
 ## Important Paths
