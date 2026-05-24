@@ -5,16 +5,16 @@
 # Installs and updates Simon Willison's `llm` CLI (with a trimmed plugin set),
 # Anthropic's Claude Code, and a set of Claude Code skills on Debian/Kali Linux.
 #
-# Runs as the current $USER. Idempotent: install-if-missing by default,
-# upgrade with --upgrade. Self-updates from git on every run.
+# Runs as the current $USER. Idempotent: installs what is missing and upgrades
+# whatever is already installed on every run. Self-updates from git on every run.
 #
 # Provider configuration (Azure / Gemini / etc.) is the user's job — see
 # the README. Setup only seeds Azure model YAML templates the first time;
 # never overwrites existing ones.
 #
 # Usage:
-#   ./linux/setup.sh             # install missing tools, seed configs
-#   ./linux/setup.sh --upgrade   # also upgrade llm + claude code if installed
+#   ./linux/setup.sh                # install missing tools + upgrade installed ones
+#   ./linux/setup.sh --skip-skills  # same, but skip the skills sync
 #
 
 set -eo pipefail
@@ -29,15 +29,16 @@ source "$SCRIPT_DIR/common.sh"
 #############################################################################
 
 ORIGINAL_ARGS=("$@")
-UPGRADE_MODE=false
 SKIP_SKILLS=false
 
 show_usage() {
     cat <<EOF
 Usage: $0 [OPTIONS]
 
+Installed components (llm + plugins, Claude Code, gitingest) are upgraded
+automatically on every run — there is no separate --upgrade flag.
+
 Options:
-  --upgrade        Upgrade llm + plugins and Claude Code if already installed
   --skip-skills    Skip the skills sync (statusline is still installed)
   --help, -h       Show this help and exit
 
@@ -52,9 +53,6 @@ EOF
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        --upgrade)
-            UPGRADE_MODE=true
-            ;;
         --skip-skills)
             SKIP_SKILLS=true
             ;;
@@ -119,7 +117,13 @@ log "Phase 1: Prerequisites"
 log "Refreshing apt index..."
 sudo apt-get update -qq
 
-install_apt_packages git curl jq ca-certificates
+# bubblewrap (bwrap) is required by `blaude` (Phase 6) for Claude Code sandboxing.
+install_apt_packages git curl jq ca-certificates bubblewrap
+
+# On Ubuntu 24.04+/Kali, AppArmor restricts unprivileged user namespaces, which
+# breaks bwrap. Install a permissive profile for bwrap (idempotent, sudo).
+configure_bwrap_apparmor
+
 install_or_upgrade_uv
 
 #############################################################################
@@ -160,21 +164,87 @@ REMOTE_PLUGINS=(
 )
 
 LLM_SOURCE="git+https://github.com/c0ffee0wl/llm"
+ALL_PLUGINS=("${REMOTE_PLUGINS[@]}")
 
-# Build --with arguments
-WITH_ARGS=()
-for plugin in "${REMOTE_PLUGINS[@]}"; do
-    WITH_ARGS+=("--with" "$plugin")
-done
+# State lives in the llm user config dir (where llm-uv-tool reads it).
+LLM_CONFIG_DIR="$HOME/.config/io.datasette.llm"
+LLM_FINGERPRINT_FILE="$LLM_CONFIG_DIR/llm-install-fingerprint"
 
-if ! command -v llm &>/dev/null || ! uv tool list 2>/dev/null | grep -q '^llm '; then
-    log "Installing llm with plugins..."
-    uv tool install --force "${WITH_ARGS[@]}" "$LLM_SOURCE"
-elif [ "$UPGRADE_MODE" = "true" ]; then
-    log "Upgrading llm with plugins..."
-    uv tool install --force "${WITH_ARGS[@]}" "$LLM_SOURCE"
+# Fingerprint of the plugin list + source URL (not local code).
+# Changes only when plugins are added/removed/changed — triggers full reinstall.
+compute_plugin_list_fingerprint() {
+    { printf 'llm:%s\n' "$LLM_SOURCE"
+      printf '%s\n' "${ALL_PLUGINS[@]}" | sort
+    } | sha256sum | awk '{print $1}'
+}
+
+# Detect user-installed plugins (added via `llm install`, not in ALL_PLUGINS).
+# Reads uv-tool-packages.json before we overwrite it.
+detect_user_plugins() {
+    USER_PLUGINS=()
+    local packages_file="$LLM_CONFIG_DIR/uv-tool-packages.json"
+    [ -f "$packages_file" ] || return 0
+
+    local p pkg
+    local -A managed
+    for p in "${ALL_PLUGINS[@]}"; do managed["$p"]=1; done
+    managed["git+https://github.com/c0ffee0wl/llm-uv-tool"]=1
+
+    while IFS= read -r pkg; do
+        [ -z "$pkg" ] && continue
+        [ -z "${managed[$pkg]+_}" ] && USER_PLUGINS+=("$pkg")
+    done < <(jq -r '.[]' "$packages_file" 2>/dev/null)
+
+    if [ ${#USER_PLUGINS[@]} -gt 0 ]; then
+        log "Preserving ${#USER_PLUGINS[@]} user-installed plugin(s)"
+    fi
+}
+
+# Write uv-tool-packages.json so that future `llm install <user-plugin>` calls
+# (handled by llm-uv-tool) preserve our git-fork URLs. llm-uv-tool's get_plugins()
+# only sees distribution names (e.g. "llm-gemini"), not source URLs, so without
+# this file it would fall back to PyPI on reinstall.
+update_uv_tool_packages_json() {
+    local packages_file="$LLM_CONFIG_DIR/uv-tool-packages.json"
+    mkdir -p "$LLM_CONFIG_DIR"
+    # Keep the `if` as the group's last command so the brace group exits 0 when
+    # there are no user plugins — otherwise pipefail + set -e would abort here.
+    {
+        printf '%s\n' "${ALL_PLUGINS[@]}" | grep -v "llm-uv-tool"
+        if [ ${#USER_PLUGINS[@]} -gt 0 ]; then printf '%s\n' "${USER_PLUGINS[@]}"; fi
+    } | sort -u | jq -R . | jq -s . > "$packages_file"
+}
+
+LLM_PLUGIN_FINGERPRINT=$(compute_plugin_list_fingerprint)
+STORED_FINGERPRINT=$(cat "$LLM_FINGERPRINT_FILE" 2>/dev/null || echo "")
+
+if ! command -v llm &>/dev/null || ! uv tool list 2>/dev/null | grep -q '^llm ' || \
+   [ "$LLM_PLUGIN_FINGERPRINT" != "$STORED_FINGERPRINT" ]; then
+
+    # Full install: first run, llm missing, or the plugin list changed.
+    detect_user_plugins
+
+    INSTALL_ARGS=(uv tool install --force)
+    for plugin in "${ALL_PLUGINS[@]}" "${USER_PLUGINS[@]}"; do
+        INSTALL_ARGS+=(--with "$plugin")
+    done
+    INSTALL_ARGS+=("$LLM_SOURCE")
+
+    log "Installing llm with $(( ${#ALL_PLUGINS[@]} + ${#USER_PLUGINS[@]} )) plugins..."
+    "${INSTALL_ARGS[@]}"
+
+    update_uv_tool_packages_json
+
+    mkdir -p "$LLM_CONFIG_DIR"
+    echo "$LLM_PLUGIN_FINGERPRINT" > "$LLM_FINGERPRINT_FILE"
+    log "llm and plugins ready"
 else
-    log "llm already installed (use --upgrade to refresh plugins)"
+    # Incremental upgrade: pull latest git commits + PyPI updates, keep the venv
+    # (llm-uv-tool preserves the plugin set across the upgrade). Non-fatal so a
+    # transient network/registry failure doesn't abort the rest of setup.
+    log "Upgrading llm and plugins..."
+    uv tool upgrade llm || warn "llm upgrade failed, continuing..."
+    log "llm and plugins upgraded"
 fi
 
 #############################################################################
@@ -187,7 +257,7 @@ fi
 
 log "Phase 3: Seed Azure config templates"
 
-LLM_CONFIG_DIR="$HOME/.config/io.datasette.llm"
+# LLM_CONFIG_DIR is defined in Phase 2.
 mkdir -p "$LLM_CONFIG_DIR"
 
 for cfg in extra-openai-models.yaml azure-embeddings-models.yaml; do
@@ -209,12 +279,8 @@ log "Phase 4: Claude Code"
 
 NATIVE_CLAUDE="$HOME/.local/bin/claude"
 if [ -x "$NATIVE_CLAUDE" ]; then
-    if [ "$UPGRADE_MODE" = "true" ]; then
-        log "Upgrading Claude Code..."
-        "$NATIVE_CLAUDE" update || warn "Claude Code update failed, continuing..."
-    else
-        log "Claude Code already installed (use --upgrade to refresh)"
-    fi
+    log "Updating Claude Code..."
+    "$NATIVE_CLAUDE" update || warn "Claude Code update failed, continuing..."
 else
     log "Installing Claude Code..."
     curl_secure -fsSL https://claude.ai/install.sh | bash
@@ -286,41 +352,34 @@ fi
 
 log "Phase 6: Additional CLI tools"
 
-# gitingest — Git repo → LLM-friendly text
-if ! command -v gitingest &>/dev/null; then
-    install_or_upgrade_uv_tool gitingest
-elif [ "$UPGRADE_MODE" = "true" ]; then
-    install_or_upgrade_uv_tool gitingest
-else
-    log "gitingest already installed (use --upgrade to refresh)"
-fi
+# gitingest — Git repo → LLM-friendly text (helper auto-detects install vs upgrade)
+install_or_upgrade_uv_tool gitingest
 
-# imagemage — Gemini image-generation CLI (used by the image-generation skill)
+# imagemage — Gemini image-generation CLI (used by the image-generation skill).
+# Install-if-missing only: a Go rebuild on every run would be wasteful.
 IMAGEMAGE_BIN="$HOME/.local/bin/imagemage"
-NEED_IMAGEMAGE_BUILD=false
-if [ ! -x "$IMAGEMAGE_BIN" ]; then
-    NEED_IMAGEMAGE_BUILD=true
-elif [ "$UPGRADE_MODE" = "true" ]; then
-    NEED_IMAGEMAGE_BUILD=true
+if [ -x "$IMAGEMAGE_BIN" ]; then
+    log "imagemage already installed"
+elif install_go; then
+    log "Building imagemage from source..."
+    mkdir -p "$(dirname "$IMAGEMAGE_BIN")"
+    IMAGEMAGE_DIR="$(mktemp -d)"
+    trap 'rm -rf "$IMAGEMAGE_DIR"' EXIT
+    git clone --depth 1 https://github.com/c0ffee0wl/imagemage.git "$IMAGEMAGE_DIR"
+    (cd "$IMAGEMAGE_DIR" && go build -o "$IMAGEMAGE_BIN" .)
+    rm -rf "$IMAGEMAGE_DIR"
+    trap - EXIT
+    log "imagemage installed to $IMAGEMAGE_BIN"
 else
-    log "imagemage already installed (use --upgrade to refresh)"
+    warn "Skipping imagemage (Go unavailable). Install Go >= 1.22 and re-run."
 fi
 
-if [ "$NEED_IMAGEMAGE_BUILD" = "true" ]; then
-    if install_go; then
-        log "Building imagemage from source..."
-        mkdir -p "$(dirname "$IMAGEMAGE_BIN")"
-        IMAGEMAGE_DIR="$(mktemp -d)"
-        trap 'rm -rf "$IMAGEMAGE_DIR"' EXIT
-        git clone --depth 1 https://github.com/c0ffee0wl/imagemage.git "$IMAGEMAGE_DIR"
-        (cd "$IMAGEMAGE_DIR" && go build -o "$IMAGEMAGE_BIN" .)
-        rm -rf "$IMAGEMAGE_DIR"
-        trap - EXIT
-        log "imagemage installed to $IMAGEMAGE_BIN"
-    else
-        warn "Skipping imagemage (Go unavailable). Install Go >= 1.22 and re-run."
-    fi
-fi
+# blaude — bubblewrap sandbox wrapper for Claude Code (raw script from the
+# c0ffee0wl/blaude repo). Always re-fetched, so it is refreshed on every run.
+# Requires bwrap (installed in Phase 1). The osc52-clipboard script from the
+# same repo is intentionally NOT installed.
+mkdir -p "$HOME/.local/bin"
+install_blaude_repo_script blaude
 
 #############################################################################
 # Summary
@@ -333,6 +392,7 @@ log "  llm:        $(command -v llm 2>/dev/null || echo 'not on PATH — open a 
 log "  claude:     $(command -v claude 2>/dev/null || echo 'not on PATH — open a new shell')"
 log "  gitingest:  $(command -v gitingest 2>/dev/null || echo 'not installed')"
 log "  imagemage:  $([ -x "$HOME/.local/bin/imagemage" ] && echo "$HOME/.local/bin/imagemage" || echo 'not installed')"
+log "  blaude:     $([ -x "$HOME/.local/bin/blaude" ] && echo "$HOME/.local/bin/blaude" || echo 'not installed')"
 log "  skills:     $HOME/.claude/skills/"
 log "  statusline: $HOME/.claude/statusline.sh"
 log ""

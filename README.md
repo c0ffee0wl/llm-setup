@@ -48,13 +48,10 @@ Re-running `./linux/setup.sh` will never overwrite an existing YAML in `~/.confi
 
 | Command | What it does |
 |---|---|
-| `./linux/setup.sh` | Install missing tools, seed Azure YAML templates if absent |
-| `./linux/setup.sh --upgrade` | Re-install `llm` (refreshes plugins) and run `claude update` |
-| `./linux/setup.sh --skip-skills` | Install/seed everything except the skills sync (statusline still installed) |
+| `./linux/setup.sh` | Install missing tools, upgrade already-installed ones, seed Azure YAML templates if absent |
+| `./linux/setup.sh --skip-skills` | Same, but skip the skills sync (statusline still installed) |
 
-`--skip-skills` and `--upgrade` can be combined.
-
-Idempotent and non-interactive: re-running is safe; the script never prompts. By default tools are install-if-missing only — pass `--upgrade` to refresh.
+Idempotent and non-interactive: re-running is safe; the script never prompts. There is **no `--upgrade` flag** — installed components (`llm` + plugins, Claude Code, `gitingest`) are upgraded automatically on every run. `llm` is fully reinstalled only when its plugin list changes (tracked by a fingerprint); otherwise it gets a fast `uv tool upgrade`. `imagemage` is install-if-missing only (no per-run Go rebuild).
 
 If `claude` is actively running, setup refuses to proceed (Phase 0 self-update and `claude update` can swap the binary under a live session). Stop your Claude session, then re-run.
 
@@ -66,6 +63,7 @@ If `claude` is actively running, setup refuses to proceed (Phase 0 self-update a
 - **Claude Code statusline** at `~/.claude/statusline.sh` (sourced from `/opt/claude-litellm`'s richer LiteLLM-aware variant; degrades gracefully without LiteLLM). `~/.claude/settings.json` is written only on first install — never clobbered.
 - **`gitingest`** (uv tool) — turns a git repo into LLM-friendly text.
 - **`imagemage`** (Go binary at `~/.local/bin/imagemage`) — Gemini image-generation CLI used by the `image-generation` skill. Needs Go ≥ 1.22 (installed from apt if missing); silently skipped if apt can't supply a recent enough Go.
+- **`blaude`** (script at `~/.local/bin/blaude`) — a [bubblewrap](https://github.com/containers/bubblewrap) sandbox wrapper for Claude Code, fetched from [c0ffee0wl/blaude](https://github.com/c0ffee0wl/blaude). The `bubblewrap` package is installed from apt; on Kali/Ubuntu 24.04+ an AppArmor profile for `bwrap` is also written (`/etc/apparmor.d/bwrap`, via sudo) so unprivileged user namespaces work. The companion `osc52-clipboard` script is **not** installed.
 
 ## What's _not_ installed
 

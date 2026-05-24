@@ -80,6 +80,41 @@ install_apt_packages() {
 }
 
 #############################################################################
+# AppArmor (bwrap)
+#############################################################################
+
+# Configure AppArmor to allow bwrap to create user namespaces
+# Ubuntu 24.04+ restricts unprivileged user namespaces via AppArmor by default,
+# which breaks bwrap sandboxing (used by workflow engine and code execution tools)
+# Idempotent: only creates profile if not already present
+configure_bwrap_apparmor() {
+    if command -v apparmor_parser &> /dev/null && \
+       [ -d /sys/module/apparmor ] && \
+       [ -f /proc/sys/kernel/apparmor_restrict_unprivileged_userns ] && \
+       [ "$(cat /proc/sys/kernel/apparmor_restrict_unprivileged_userns)" = "1" ] && \
+       [ ! -f /etc/apparmor.d/bwrap ]; then
+        log "Configuring AppArmor profile for bwrap..."
+        if sudo tee /etc/apparmor.d/bwrap > /dev/null <<'APPARMOR'
+abi <abi/4.0>,
+include <tunables/global>
+
+profile bwrap /usr/bin/bwrap flags=(unconfined) {
+  userns,
+
+  include if exists <local/bwrap>
+}
+APPARMOR
+        then
+            sudo apparmor_parser -r /etc/apparmor.d/bwrap || warn "Failed to load AppArmor bwrap profile"
+        else
+            warn "Failed to write AppArmor bwrap profile"
+        fi
+    else
+        log "AppArmor bwrap profile already configured or not needed"
+    fi
+}
+
+#############################################################################
 # uv
 #############################################################################
 
@@ -251,5 +286,29 @@ install_go() {
     else
         warn "Go >= $MIN_GO_VERSION not available from apt (found: ${repo_version:-none})"
         return 1
+    fi
+}
+
+#############################################################################
+# blaude
+#############################################################################
+
+# Install/update tools shipped as raw files from the c0ffee0wl/blaude repo.
+# Downloads to a temp file and moves into place only on success, so a mid-transfer
+# failure never clobbers a previously-working binary with a truncated one.
+install_blaude_repo_script() {
+    local name="$1"
+    local dest="$HOME/.local/bin/$name"
+    local tmp
+    tmp="$(mktemp)"
+    log "Installing/updating $name..."
+    if curl_secure -fsSL -H "Cache-Control: no-cache" \
+        "https://raw.githubusercontent.com/c0ffee0wl/blaude/main/$name" -o "$tmp"; then
+        chmod +x "$tmp"
+        mv "$tmp" "$dest"
+        log "$name installed to $dest"
+    else
+        rm -f "$tmp"
+        warn "Failed to download $name"
     fi
 }
