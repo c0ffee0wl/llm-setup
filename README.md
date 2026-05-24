@@ -65,14 +65,6 @@ If `claude` is actively running, setup refuses to proceed (Phase 0 self-update a
 - **`imagemage`** (Go binary at `~/.local/bin/imagemage`) — Gemini image-generation CLI used by the `image-generation` skill. Needs Go ≥ 1.22 (installed from apt if missing); silently skipped if apt can't supply a recent enough Go.
 - **`blaude`** (script at `~/.local/bin/blaude`) — a [bubblewrap](https://github.com/containers/bubblewrap) sandbox wrapper for Claude Code, fetched from [c0ffee0wl/blaude](https://github.com/c0ffee0wl/blaude). The `bubblewrap` package is installed from apt; on Kali/Ubuntu 24.04+ an AppArmor profile for `bwrap` is also written (`/etc/apparmor.d/bwrap`, via sudo) so unprivileged user namespaces work. The companion `osc52-clipboard` script is **not** installed.
 
-## What's _not_ installed
-
-By design this repo does not ship: the Terminator/inline-`@`/GTK/espanso/Ulauncher AI assistants, Claude Code Router, Codex CLI, asciinema session recording, speech-to-text, custom shell keybindings, or any `~/.bashrc`/`~/.zshrc` modifications. Interactive Azure/Gemini configuration was also removed — you configure keys and models with `llm keys set` and `llm models default` after install.
-
-Node.js and `npm` are not installed by this script. Two of the bundled skills (`pretty-mermaid`, `last30days`) need Node at runtime; if you want to use them, install Node yourself (`apt install nodejs npm` or via `nvm`) and run `npm install` inside the skill's directory under `~/.claude/skills/`.
-
-For Azure-routed Claude Code (LiteLLM gateway), see [claude-litellm](https://github.com/c0ffee0wl/claude-litellm).
-
 ## Layout
 
 ```

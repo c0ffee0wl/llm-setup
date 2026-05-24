@@ -65,6 +65,12 @@ The script refuses to run when `pgrep -u "$USER" -x claude` finds an active Clau
 - No `llm-tools-*` plugins. Add individually post-install if needed (`uv tool install --force --with llm-tools-mcp ... llm`).
 - No `llm` templates. The previous repo's `llm-wut.yaml` required the removed `context` tool. Users who want templates: `llm templates edit <name>`.
 
+## Editing the scripts
+
+- **`setup.sh` runs under `set -eo pipefail`** (it sources `common.sh`, which has a `_LLM_COMMON_SOURCED` guard). This is the main hazard when porting code from `llm-linux-setup`: a brace group or `cmd1 && cmd2` whose **last** command exits non-zero — e.g. `[ ${#arr[@]} -gt 0 ] && printf ...` when the array is empty — becomes the pipeline's exit status under `pipefail` and aborts the whole script. Use an `if` block as the last statement (or append `|| true`). See the comment in `update_uv_tool_packages_json` (Phase 2). `set -u` is intentionally **not** set, so empty-array expansions like `"${USER_PLUGINS[@]}"` are safe. Network-dependent upgrades that should not be fatal are wrapped in `|| warn ...`.
+- **`common.sh` = reusable helpers; `setup.sh` = the phase sequence.** Add install logic as an `install_or_upgrade_*` / `configure_*` helper in `common.sh` (use `curl_secure` for downloads, the `compare_versions` / `version_at_least` pair for version gating), then call it from the relevant phase.
+- **No test harness.** Validate with `bash -n` (syntax) plus a real re-run on a Debian/Kali box; every phase must stay idempotent and safe to run twice.
+
 ## Verification
 
 ```bash
