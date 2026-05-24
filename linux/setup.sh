@@ -65,7 +65,7 @@ while [[ $# -gt 0 ]]; do
 done
 
 if [ "$EUID" -eq 0 ]; then
-    error "Do not run this script as root. Run it as your normal user."
+    warn "Running as root. This script is intended to run as your normal user; continuing anyway."
 fi
 
 #############################################################################
