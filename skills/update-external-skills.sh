@@ -122,9 +122,11 @@ migrate_old_name() {
         rm -rf "$old_dest"
     fi
 
-    # Remove old name from .gitignore
-    if [[ -f "$GITIGNORE" ]] && grep -q "^${old_name}/$" "$GITIGNORE" 2>/dev/null; then
-        sed -i "/^${old_name}\/$/d" "$GITIGNORE"
+    # Remove old name from .gitignore. Fixed-string, whole-line match (-xF) so a
+    # crafted old_name can't inject sed/regex metacharacters.
+    if [[ -f "$GITIGNORE" ]] && grep -qxF "${old_name}/" "$GITIGNORE" 2>/dev/null; then
+        grep -vxF "${old_name}/" "$GITIGNORE" > "$GITIGNORE.tmp" 2>/dev/null || true
+        mv "$GITIGNORE.tmp" "$GITIGNORE"
         log_info "  Migrating: removed $old_name/ from .gitignore"
     fi
 }
@@ -134,6 +136,13 @@ repo_cache_key() {
     local repo="$1"
     # Convert URL to safe directory name: github.com/owner/repo -> owner_repo
     echo "$repo" | sed -E 's|https://github.com/||; s|/|_|g; s|\.git$||'
+}
+
+# Shallow-clone repo $1 (at branch/tag $2) into $3, falling back to the repo's
+# default branch when the ref doesn't exist. Shared by the cache + direct paths.
+clone_repo() {
+    git clone --depth 1 --branch "$2" "$1" "$3" 2>/dev/null || \
+    git clone --depth 1 "$1" "$3"
 }
 
 # Clone or update a repo in cache
@@ -158,8 +167,7 @@ ensure_repo_cached() {
     else
         log_info "  Cloning to cache..."
         rm -rf "$CACHED_REPO_DIR"
-        git clone --depth 1 --branch "$ref" "$repo" "$CACHED_REPO_DIR" 2>/dev/null || \
-        git clone --depth 1 "$repo" "$CACHED_REPO_DIR"
+        clone_repo "$repo" "$ref" "$CACHED_REPO_DIR"
     fi
 }
 
@@ -189,6 +197,22 @@ update_skills() {
 
         if [[ -z "$name" ]] || [[ -z "$repo" ]]; then
             log_warn "Skipping skill $i: missing name or repo"
+            continue
+        fi
+
+        # Guard against path traversal before any rm -rf / cp / clone below.
+        # name and old_name are single directory components; path is a repo-
+        # relative subdir (slashes ok, but never ".." or an absolute path).
+        if [[ "$name" == *..* || "$name" == */* ]]; then
+            log_warn "Skipping skill $i: unsafe name '$name'"
+            continue
+        fi
+        if [[ -n "$old_name" && ( "$old_name" == *..* || "$old_name" == */* ) ]]; then
+            log_warn "Skipping skill $i: unsafe old_name '$old_name'"
+            continue
+        fi
+        if [[ "$path" == /* || "$path" == *..* ]]; then
+            log_warn "Skipping skill $i: unsafe path '$path'"
             continue
         fi
 
@@ -233,8 +257,7 @@ update_skills() {
                     log_warn "  Remote URL changed: $current_remote -> $repo"
                     log_info "  Re-cloning from new remote..."
                     rm -rf "$target_dir"
-                    git clone --depth 1 --branch "$ref" "$repo" "$target_dir" 2>/dev/null || \
-                    git clone --depth 1 "$repo" "$target_dir"
+                    clone_repo "$repo" "$ref" "$target_dir"
                 else
                     log_info "  Updating existing clone..."
                     (
@@ -250,8 +273,7 @@ update_skills() {
                 continue
             else
                 log_info "  Cloning..."
-                git clone --depth 1 --branch "$ref" "$repo" "$target_dir" 2>/dev/null || \
-                git clone --depth 1 "$repo" "$target_dir"
+                clone_repo "$repo" "$ref" "$target_dir"
             fi
         fi
 

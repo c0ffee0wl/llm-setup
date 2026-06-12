@@ -149,12 +149,8 @@ install_or_upgrade_uv() {
         pipx install uv
     else
         log "uv is already installed, upgrading..."
-        if command -v pipx &> /dev/null; then
-            pipx upgrade uv 2>/dev/null || {
-                log "Upgrading uv via standalone installer..."
-                curl_secure -LsSf https://astral.sh/uv/install.sh | sh
-            }
-        else
+        if ! { command -v pipx &> /dev/null && pipx upgrade uv 2>/dev/null; }; then
+            log "Upgrading uv via standalone installer..."
             curl_secure -LsSf https://astral.sh/uv/install.sh | sh
         fi
     fi

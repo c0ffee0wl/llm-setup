@@ -201,7 +201,10 @@ run_uninstall() {
             # Pull `name:` / `old_name:` values without needing a YAML parser at
             # uninstall time. Comment lines start with `#`, so they don't match.
             while IFS= read -r name; do
-                [ -n "$name" ] && managed_skills["$name"]=1
+                [ -n "$name" ] || continue
+                # Skip traversal / absolute names so the rm -rf below stays under skills/.
+                [[ "$name" == *..* || "$name" == */* ]] && continue
+                managed_skills["$name"]=1
             done < <(grep -oE '^[[:space:]]*(-[[:space:]]+)?(name|old_name):[[:space:]]*[^[:space:]]+' "$manifest" 2>/dev/null \
                         | sed -E 's/.*:[[:space:]]*//')
         fi
@@ -398,6 +401,7 @@ ALL_PLUGINS=("${REMOTE_PLUGINS[@]}")
 # State lives in the llm user config dir (where llm-uv-tool reads it).
 LLM_CONFIG_DIR="$HOME/.config/io.datasette.llm"
 LLM_FINGERPRINT_FILE="$LLM_CONFIG_DIR/llm-install-fingerprint"
+mkdir -p "$LLM_CONFIG_DIR"   # created once here; Phase 2/3 writers rely on it
 
 # Fingerprint of the plugin list + source URL (not local code).
 # Changes only when plugins are added/removed/changed — triggers full reinstall.
@@ -435,7 +439,6 @@ detect_user_plugins() {
 # this file it would fall back to PyPI on reinstall.
 update_uv_tool_packages_json() {
     local packages_file="$LLM_CONFIG_DIR/uv-tool-packages.json"
-    mkdir -p "$LLM_CONFIG_DIR"
     # Keep the `if` as the group's last command so the brace group exits 0 when
     # there are no user plugins — otherwise pipefail + set -e would abort here.
     {
@@ -464,7 +467,6 @@ if ! command -v llm &>/dev/null || ! uv tool list 2>/dev/null | grep -q '^llm ' 
 
     update_uv_tool_packages_json
 
-    mkdir -p "$LLM_CONFIG_DIR"
     echo "$LLM_PLUGIN_FINGERPRINT" > "$LLM_FINGERPRINT_FILE"
     log "llm and plugins ready"
 else
@@ -486,9 +488,7 @@ fi
 
 log "Phase 3: Seed Azure config templates"
 
-# LLM_CONFIG_DIR is defined in Phase 2.
-mkdir -p "$LLM_CONFIG_DIR"
-
+# LLM_CONFIG_DIR is defined and created in Phase 2.
 for cfg in extra-openai-models.yaml azure-embeddings-models.yaml; do
     src="$SCRIPT_DIR/configs/$cfg"
     dst="$LLM_CONFIG_DIR/$cfg"
