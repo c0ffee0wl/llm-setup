@@ -102,6 +102,19 @@ fi
 # Shared definitions used by both install and uninstall
 #############################################################################
 
+# llm config dir (where llm-uv-tool reads its state) and the two Phase 2
+# state files that live there. Shared so the uninstall path removes exactly
+# what the install path writes.
+LLM_CONFIG_DIR="$HOME/.config/io.datasette.llm"
+LLM_FINGERPRINT_FILE="$LLM_CONFIG_DIR/llm-install-fingerprint"
+LLM_PACKAGES_FILE="$LLM_CONFIG_DIR/uv-tool-packages.json"
+
+# Claude Code user-state paths that Phase 5 writes and uninstall removes.
+CLAUDE_DIR="$HOME/.claude"
+CLAUDE_SKILLS_DIR="$CLAUDE_DIR/skills"
+STATUSLINE_DEST="$CLAUDE_DIR/statusline.sh"
+SETTINGS_FILE="$CLAUDE_DIR/settings.json"
+
 # The settings.json we deploy on a fresh install (Phase 5). Defined once so the
 # uninstall path can recognise an unmodified file and remove only that.
 settings_template() {
@@ -125,7 +138,6 @@ SETTINGS_EOF
 run_uninstall() {
     UNINSTALL_SKIPPED=()
     local removed_anything=false
-    local llm_config_dir="$HOME/.config/io.datasette.llm"
 
     log "llm-setup Uninstall"
     if [ "$DRY_RUN" = "true" ]; then
@@ -146,13 +158,8 @@ run_uninstall() {
     #    later run reads uv-tool-packages.json to preserve user-installed plugins.
     if confirm_uninstall "LLM core tool, all installed plugins (uv tool 'llm'), and its install state"; then
         uninstall_uv_tool llm
-        local state
-        for state in llm-install-fingerprint uv-tool-packages.json; do
-            if [ -f "$llm_config_dir/$state" ]; then
-                do_or_dry "rm $llm_config_dir/$state" rm -f "$llm_config_dir/$state" \
-                    || warn "Failed to remove $llm_config_dir/$state"
-            fi
-        done
+        remove_path "$LLM_FINGERPRINT_FILE"
+        remove_path "$LLM_PACKAGES_FILE"
         removed_anything=true
     fi
 
@@ -164,10 +171,7 @@ run_uninstall() {
 
     # 3. Claude Code native binary
     if confirm_uninstall "Claude Code native binary (~/.local/bin/claude)"; then
-        if [ -f "$HOME/.local/bin/claude" ]; then
-            do_or_dry "rm ~/.local/bin/claude" rm -f "$HOME/.local/bin/claude" \
-                || warn "Failed to remove ~/.local/bin/claude (in use? try again from another shell)"
-        fi
+        remove_path "$HOME/.local/bin/claude" "(in use? try again from another shell)"
         removed_anything=true
     fi
 
@@ -175,10 +179,7 @@ run_uninstall() {
     if confirm_uninstall "CLI binaries (~/.local/bin/{imagemage,blaude})"; then
         local bin
         for bin in imagemage blaude; do
-            if [ -f "$HOME/.local/bin/$bin" ] || [ -L "$HOME/.local/bin/$bin" ]; then
-                do_or_dry "rm ~/.local/bin/$bin" rm -f "$HOME/.local/bin/$bin" \
-                    || warn "Failed to remove ~/.local/bin/$bin"
-            fi
+            remove_path "$HOME/.local/bin/$bin"
         done
         removed_anything=true
     fi
@@ -190,7 +191,7 @@ run_uninstall() {
     if confirm_uninstall "Claude Code skills + statusline (~/.claude/skills/<managed>, ~/.claude/statusline.sh)"; then
         local manifest="$REPO_DIR/skills/external-skills.yaml"
         local -A managed_skills=()
-        local name dest skill_dir
+        local name skill_dir
         if [ -d "$REPO_DIR/skills" ]; then
             for skill_dir in "$REPO_DIR"/skills/*/; do
                 [ -d "$skill_dir" ] || continue
@@ -209,24 +210,16 @@ run_uninstall() {
                         | sed -E 's/.*:[[:space:]]*//')
         fi
         for name in "${!managed_skills[@]}"; do
-            dest="$HOME/.claude/skills/$name"
-            if [ -d "$dest" ]; then
-                do_or_dry "rm -rf $dest" rm -rf "$dest" || warn "Failed to remove $dest"
-            fi
+            remove_path "$CLAUDE_SKILLS_DIR/$name"
         done
-        if [ -f "$HOME/.claude/statusline.sh" ]; then
-            do_or_dry "rm ~/.claude/statusline.sh" rm -f "$HOME/.claude/statusline.sh" \
-                || warn "Failed to remove ~/.claude/statusline.sh"
-        fi
+        remove_path "$STATUSLINE_DEST"
         # settings.json — remove only if byte-identical to our fresh-install template
         # (it may carry the user's trust/theme/permissions otherwise).
-        local settings_file="$HOME/.claude/settings.json"
-        if [ -f "$settings_file" ]; then
-            if diff -q <(settings_template) "$settings_file" >/dev/null 2>&1; then
-                do_or_dry "rm ~/.claude/settings.json" rm -f "$settings_file" \
-                    || warn "Failed to remove $settings_file"
+        if [ -f "$SETTINGS_FILE" ]; then
+            if diff -q <(settings_template) "$SETTINGS_FILE" >/dev/null 2>&1; then
+                remove_path "$SETTINGS_FILE"
             else
-                warn "Keeping $settings_file — appears user-modified"
+                warn "Keeping $SETTINGS_FILE — appears user-modified"
             fi
         fi
         removed_anything=true
@@ -346,9 +339,8 @@ fi
 
 log "Phase 1: Prerequisites"
 
-log "Refreshing apt index..."
-sudo apt-get update -qq
-
+# The apt index is refreshed lazily (apt_update_once) just before an actual
+# install, so a steady-state re-run pays no multi-second refresh.
 # bubblewrap (bwrap) is required by `blaude` (Phase 6) for Claude Code sandboxing.
 install_apt_packages git curl jq ca-certificates bubblewrap
 
@@ -396,37 +388,32 @@ REMOTE_PLUGINS=(
 )
 
 LLM_SOURCE="git+https://github.com/c0ffee0wl/llm"
-ALL_PLUGINS=("${REMOTE_PLUGINS[@]}")
 
-# State lives in the llm user config dir (where llm-uv-tool reads it).
-LLM_CONFIG_DIR="$HOME/.config/io.datasette.llm"
-LLM_FINGERPRINT_FILE="$LLM_CONFIG_DIR/llm-install-fingerprint"
+# LLM_CONFIG_DIR and the state-file paths are defined in the shared section.
 mkdir -p "$LLM_CONFIG_DIR"   # created once here; Phase 2/3 writers rely on it
 
 # Fingerprint of the plugin list + source URL (not local code).
 # Changes only when plugins are added/removed/changed — triggers full reinstall.
 compute_plugin_list_fingerprint() {
     { printf 'llm:%s\n' "$LLM_SOURCE"
-      printf '%s\n' "${ALL_PLUGINS[@]}" | sort
+      printf '%s\n' "${REMOTE_PLUGINS[@]}" | sort
     } | sha256sum | awk '{print $1}'
 }
 
-# Detect user-installed plugins (added via `llm install`, not in ALL_PLUGINS).
+# Detect user-installed plugins (added via `llm install`, not in REMOTE_PLUGINS).
 # Reads uv-tool-packages.json before we overwrite it.
 detect_user_plugins() {
     USER_PLUGINS=()
-    local packages_file="$LLM_CONFIG_DIR/uv-tool-packages.json"
-    [ -f "$packages_file" ] || return 0
+    [ -f "$LLM_PACKAGES_FILE" ] || return 0
 
     local p pkg
     local -A managed
-    for p in "${ALL_PLUGINS[@]}"; do managed["$p"]=1; done
-    managed["git+https://github.com/c0ffee0wl/llm-uv-tool"]=1
+    for p in "${REMOTE_PLUGINS[@]}"; do managed["$p"]=1; done
 
     while IFS= read -r pkg; do
         [ -z "$pkg" ] && continue
         [ -z "${managed[$pkg]+_}" ] && USER_PLUGINS+=("$pkg")
-    done < <(jq -r '.[]' "$packages_file" 2>/dev/null)
+    done < <(jq -r '.[]' "$LLM_PACKAGES_FILE" 2>/dev/null)
 
     if [ ${#USER_PLUGINS[@]} -gt 0 ]; then
         log "Preserving ${#USER_PLUGINS[@]} user-installed plugin(s)"
@@ -438,31 +425,30 @@ detect_user_plugins() {
 # only sees distribution names (e.g. "llm-gemini"), not source URLs, so without
 # this file it would fall back to PyPI on reinstall.
 update_uv_tool_packages_json() {
-    local packages_file="$LLM_CONFIG_DIR/uv-tool-packages.json"
     # Keep the `if` as the group's last command so the brace group exits 0 when
     # there are no user plugins — otherwise pipefail + set -e would abort here.
     {
-        printf '%s\n' "${ALL_PLUGINS[@]}" | grep -v "llm-uv-tool"
+        printf '%s\n' "${REMOTE_PLUGINS[@]}" | grep -v "llm-uv-tool"
         if [ ${#USER_PLUGINS[@]} -gt 0 ]; then printf '%s\n' "${USER_PLUGINS[@]}"; fi
-    } | sort -u | jq -R . | jq -s . > "$packages_file"
+    } | sort -u | jq -R . | jq -s . > "$LLM_PACKAGES_FILE"
 }
 
 LLM_PLUGIN_FINGERPRINT=$(compute_plugin_list_fingerprint)
 STORED_FINGERPRINT=$(cat "$LLM_FINGERPRINT_FILE" 2>/dev/null || echo "")
 
-if ! command -v llm &>/dev/null || ! uv tool list 2>/dev/null | grep -q '^llm ' || \
+if ! command -v llm &>/dev/null || ! uv_tool_installed llm || \
    [ "$LLM_PLUGIN_FINGERPRINT" != "$STORED_FINGERPRINT" ]; then
 
     # Full install: first run, llm missing, or the plugin list changed.
     detect_user_plugins
 
     INSTALL_ARGS=(uv tool install --force)
-    for plugin in "${ALL_PLUGINS[@]}" "${USER_PLUGINS[@]}"; do
+    for plugin in "${REMOTE_PLUGINS[@]}" "${USER_PLUGINS[@]}"; do
         INSTALL_ARGS+=(--with "$plugin")
     done
     INSTALL_ARGS+=("$LLM_SOURCE")
 
-    log "Installing llm with $(( ${#ALL_PLUGINS[@]} + ${#USER_PLUGINS[@]} )) plugins..."
+    log "Installing llm with $(( ${#REMOTE_PLUGINS[@]} + ${#USER_PLUGINS[@]} )) plugins..."
     "${INSTALL_ARGS[@]}"
 
     update_uv_tool_packages_json
@@ -488,10 +474,10 @@ fi
 
 log "Phase 3: Seed Azure config templates"
 
-# LLM_CONFIG_DIR is defined and created in Phase 2.
-for cfg in extra-openai-models.yaml azure-embeddings-models.yaml; do
-    src="$SCRIPT_DIR/configs/$cfg"
-    dst="$LLM_CONFIG_DIR/$cfg"
+# Every template in configs/ is seeded; a new file there needs no code change.
+for src in "$SCRIPT_DIR"/configs/*.yaml; do
+    [ -f "$src" ] || continue   # unmatched glob stays literal — skip it
+    dst="$LLM_CONFIG_DIR/$(basename "$src")"
     if [ ! -f "$dst" ]; then
         cp "$src" "$dst"
         log "Seeded $dst — edit to set your Azure resource URL"
@@ -526,7 +512,6 @@ if command -v claude &>/dev/null || [ -x "$NATIVE_CLAUDE" ]; then
         log "Skipping skills sync (--skip-skills)"
     else
         SKILLS_SOURCE_DIR="$REPO_DIR/skills"
-        SKILLS_DEST_DIR="$HOME/.claude/skills"
 
         if [ -x "$SKILLS_SOURCE_DIR/update-external-skills.sh" ]; then
             log "Refreshing external skills..."
@@ -534,24 +519,22 @@ if command -v claude &>/dev/null || [ -x "$NATIVE_CLAUDE" ]; then
         fi
 
         if [ -d "$SKILLS_SOURCE_DIR" ]; then
-            log "Syncing skills to $SKILLS_DEST_DIR"
-            mkdir -p "$SKILLS_DEST_DIR"
+            log "Syncing skills to $CLAUDE_SKILLS_DIR"
+            mkdir -p "$CLAUDE_SKILLS_DIR"
             for skill_dir in "$SKILLS_SOURCE_DIR"/*/; do
                 [ -d "$skill_dir" ] || continue
                 skill_name=$(basename "$skill_dir")
                 log "  $skill_name"
-                cp -rf "$skill_dir" "$SKILLS_DEST_DIR/"
+                cp -rf "$skill_dir" "$CLAUDE_SKILLS_DIR/"
             done
         fi
     fi
 
     STATUSLINE_SOURCE="$SCRIPT_DIR/scripts/statusline.sh"
-    STATUSLINE_DEST="$HOME/.claude/statusline.sh"
-    SETTINGS_FILE="$HOME/.claude/settings.json"
 
     if [ -f "$STATUSLINE_SOURCE" ]; then
         log "Installing Claude Code statusline..."
-        mkdir -p "$HOME/.claude"
+        mkdir -p "$CLAUDE_DIR"
         cp -f "$STATUSLINE_SOURCE" "$STATUSLINE_DEST"
         chmod +x "$STATUSLINE_DEST"
 
@@ -584,13 +567,7 @@ if [ -x "$IMAGEMAGE_BIN" ]; then
     log "imagemage already installed"
 elif install_go; then
     log "Building imagemage from source..."
-    mkdir -p "$(dirname "$IMAGEMAGE_BIN")"
-    IMAGEMAGE_DIR="$(mktemp -d)"
-    trap 'rm -rf "$IMAGEMAGE_DIR"' EXIT
-    git clone --depth 1 https://github.com/c0ffee0wl/imagemage.git "$IMAGEMAGE_DIR"
-    (cd "$IMAGEMAGE_DIR" && go build -o "$IMAGEMAGE_BIN" .)
-    rm -rf "$IMAGEMAGE_DIR"
-    trap - EXIT
+    install_go_tool_from_source https://github.com/c0ffee0wl/imagemage.git "$IMAGEMAGE_BIN"
     log "imagemage installed to $IMAGEMAGE_BIN"
 else
     warn "Skipping imagemage (Go unavailable). Install Go >= 1.22 and re-run."
@@ -600,7 +577,6 @@ fi
 # c0ffee0wl/blaude repo). Always re-fetched, so it is refreshed on every run.
 # Requires bwrap (installed in Phase 1). The osc52-clipboard script from the
 # same repo is intentionally NOT installed.
-mkdir -p "$HOME/.local/bin"
 install_blaude_repo_script blaude
 
 #############################################################################
@@ -623,8 +599,8 @@ log "  claude:     $(command -v claude 2>/dev/null || echo 'not on PATH — open
 log "  gitingest:  $(command -v gitingest 2>/dev/null || echo 'not installed')"
 log "  imagemage:  $([ -x "$HOME/.local/bin/imagemage" ] && echo "$HOME/.local/bin/imagemage" || echo 'not installed')"
 log "  blaude:     $([ -x "$HOME/.local/bin/blaude" ] && echo "$HOME/.local/bin/blaude" || echo 'not installed')"
-log "  skills:     $HOME/.claude/skills/"
-log "  statusline: $HOME/.claude/statusline.sh"
+log "  skills:     $CLAUDE_SKILLS_DIR/"
+log "  statusline: $STATUSLINE_DEST"
 log ""
 log "To use Azure or Gemini:"
 log "  1. Edit $LLM_CONFIG_DIR/extra-openai-models.yaml (replace __AZURE_API_BASE__)"

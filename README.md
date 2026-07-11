@@ -75,7 +75,7 @@ If `claude` is actively running, setup refuses to proceed (Phase 0 self-update, 
 - **`llm` CLI** (from the [c0ffee0wl/llm](https://github.com/c0ffee0wl/llm) fork) with: provider plugins (`llm-gemini`, `llm-vertex`, `llm-anthropic`, `llm-openrouter`), `llm-cmd`, `llm-git-commit`, `llm-jq`, `llm-templates-fabric`, fragment loaders (`llm-fragments-github`, `llm-fragments-pdf`, `llm-fragments-site-text`, `llm-fragments-dir`, `llm-fragments-youtube-transcript`), `llm-sort`, `llm-classify`, and `llm-uv-tool` (plugin persistence across `uv tool upgrade`).
 - **Claude Code** via the official `claude.ai/install.sh` installer.
 - **Claude Code skills** copied from this repo's `skills/` to `~/.claude/skills/`. External skills listed in `skills/external-skills.yaml` are refreshed on every run.
-- **Claude Code statusline** at `~/.claude/statusline.sh` (sourced from `/opt/claude-litellm`'s richer LiteLLM-aware variant; degrades gracefully without LiteLLM). `~/.claude/settings.json` is written only on first install — never clobbered.
+- **Claude Code statusline** at `~/.claude/statusline.sh` (a LiteLLM-aware variant shared with [claude-litellm](https://github.com/c0ffee0wl/claude-litellm); degrades gracefully without LiteLLM). `~/.claude/settings.json` is written only on first install — never clobbered.
 - **`gitingest`** (uv tool) — turns a git repo into LLM-friendly text.
 - **`imagemage`** (Go binary at `~/.local/bin/imagemage`) — Gemini image-generation CLI used by the `image-generation` skill. Needs Go ≥ 1.22 (installed from apt if missing); silently skipped if apt can't supply a recent enough Go.
 - **`blaude`** (script at `~/.local/bin/blaude`) — a [bubblewrap](https://github.com/containers/bubblewrap) sandbox wrapper for Claude Code, fetched from [c0ffee0wl/blaude](https://github.com/c0ffee0wl/blaude). The `bubblewrap` package is installed from apt; on Kali/Ubuntu 24.04+ an AppArmor profile for `bwrap` is also written (`/etc/apparmor.d/bwrap`, via sudo) so unprivileged user namespaces work. The companion `osc52-clipboard` script is **not** installed.
@@ -86,7 +86,6 @@ If `claude` is actively running, setup refuses to proceed (Phase 0 self-update, 
 llm-setup/
 ├── README.md                # this file
 ├── CLAUDE.md                # agent guidance
-├── PLAN.md                  # design rationale
 ├── skills/                  # Claude Code skills (platform-agnostic)
 └── linux/
     ├── setup.sh             # entry point (6 phases)

@@ -40,43 +40,26 @@ check_dependencies() {
     fi
 }
 
-yaml_skill_count() {
+# Emit one TSV row per manifest entry: name repo ref path old_name.
+# One parser launch for the whole manifest instead of one per field per skill.
+# Absent/empty optional fields become a "-" sentinel: tab is IFS whitespace,
+# so an empty middle field would collapse on `read` and shift later fields
+# left. Callers decode "-" back to empty. ref defaults to main.
+yaml_skills_tsv() {
     local file="$1"
     if [[ "$YAML_PARSER" == "yq" ]]; then
-        yq -r '.skills | length' "$file" 2>/dev/null || echo "0"
+        yq -r '.skills[]? | [(.name // "-"), (.repo // "-"), (.ref // "main"), (.path // "-"), (.old_name // "-")] | @tsv' "$file" 2>/dev/null || true
     else
-        python3 -c "
-import yaml
-with open('$file') as f:
-    data = yaml.safe_load(f)
-skills = data.get('skills', []) if data else []
-print(len(skills))
-" 2>/dev/null || echo "0"
-    fi
-}
-
-yaml_skill_field() {
-    local file="$1"
-    local index="$2"
-    local field="$3"
-    local default="${4:-}"
-
-    if [[ "$YAML_PARSER" == "yq" ]]; then
-        local result
-        result=$(yq -r ".skills[$index].$field // \"$default\"" "$file" 2>/dev/null)
-        [[ "$result" == "null" ]] && result="$default"
-        echo "$result"
-    else
-        python3 -c "
-import yaml
-with open('$file') as f:
-    data = yaml.safe_load(f)
-skills = data.get('skills', []) if data else []
-if $index < len(skills):
-    print(skills[$index].get('$field', '$default') or '$default')
-else:
-    print('$default')
-" 2>/dev/null || echo "$default"
+        python3 - "$file" 2>/dev/null <<'PYEOF' || true
+import sys, yaml
+with open(sys.argv[1]) as f:
+    data = yaml.safe_load(f) or {}
+for skill in data.get('skills') or []:
+    row = [skill.get('name') or '-', skill.get('repo') or '-',
+           skill.get('ref') or 'main', skill.get('path') or '-',
+           skill.get('old_name') or '-']
+    print('\t'.join(str(v) for v in row))
+PYEOF
     fi
 }
 
@@ -84,12 +67,11 @@ else:
 add_to_gitignore() {
     local skill_name="$1"
 
-    # Create .gitignore if it doesn't exist
+    # Create .gitignore if it doesn't exist (the append below adds .repo-cache/)
     if [[ ! -f "$GITIGNORE" ]]; then
         cat > "$GITIGNORE" << 'EOF'
 # External skills (cloned by update-external-skills.sh)
 # Do not commit these - they are fetched from upstream repos
-.repo-cache/
 EOF
     fi
 
@@ -105,10 +87,9 @@ EOF
     fi
 }
 
-# Migrate from old_name to new name (removes old directories and gitignore entries)
+# Remove a renamed skill's old directories and gitignore entry
 migrate_old_name() {
     local old_name="$1"
-    local new_name="$2"
     local old_dir="$SCRIPT_DIR/$old_name"
     local old_dest="$HOME/.claude/skills/$old_name"
 
@@ -145,6 +126,20 @@ clone_repo() {
     git clone --depth 1 "$1" "$3"
 }
 
+# Update the existing shallow clone at $1 to ref $2. Shared by the cache +
+# direct paths. Fail-soft on checkout/merge — a vanished upstream ref keeps
+# the current checkout; a failed fetch propagates.
+# `merge --ff-only FETCH_HEAD` fast-forwards onto what the explicit fetch just
+# got, avoiding the second network fetch that `git pull` would perform.
+update_repo() {
+    (
+        cd "$1"
+        git fetch --depth 1 origin "$2"
+        git checkout "$2" 2>/dev/null || git checkout "origin/$2" 2>/dev/null || true
+        git merge --ff-only FETCH_HEAD 2>/dev/null || true
+    )
+}
+
 # Clone or update a repo in cache
 # Sets CACHED_REPO_DIR variable with the path
 ensure_repo_cached() {
@@ -158,12 +153,7 @@ ensure_repo_cached() {
 
     if [[ -d "$CACHED_REPO_DIR/.git" ]]; then
         log_info "  Updating cached repo..."
-        (
-            cd "$CACHED_REPO_DIR"
-            git fetch --depth 1 origin "$ref"
-            git checkout "$ref" 2>/dev/null || git checkout "origin/$ref" 2>/dev/null || true
-            git pull --depth 1 --ff-only origin "$ref" 2>/dev/null || true
-        )
+        update_repo "$CACHED_REPO_DIR" "$ref"
     else
         log_info "  Cloning to cache..."
         rm -rf "$CACHED_REPO_DIR"
@@ -177,23 +167,26 @@ update_skills() {
         exit 1
     fi
 
-    local skill_count
-    skill_count=$(yaml_skill_count "$MANIFEST")
+    local rows
+    rows=$(yaml_skills_tsv "$MANIFEST")
 
-    if [[ "$skill_count" == "0" ]] || [[ -z "$skill_count" ]]; then
+    if [[ -z "$rows" ]]; then
         log_warn "No skills defined in manifest"
         exit 0
     fi
 
-    log_info "Found $skill_count external skill(s) in manifest"
+    log_info "Found $(wc -l <<<"$rows") external skill(s) in manifest"
 
-    for ((i=0; i<skill_count; i++)); do
-        local name repo ref path old_name
-        name=$(yaml_skill_field "$MANIFEST" "$i" "name" "")
-        repo=$(yaml_skill_field "$MANIFEST" "$i" "repo" "")
-        ref=$(yaml_skill_field "$MANIFEST" "$i" "ref" "main")
-        path=$(yaml_skill_field "$MANIFEST" "$i" "path" "")
-        old_name=$(yaml_skill_field "$MANIFEST" "$i" "old_name" "")
+    # Rows come in on fd 3 so loop-body commands (git clone/fetch prompts,
+    # anything reading stdin) can't swallow the remaining rows.
+    local i=-1 name repo ref path old_name
+    while IFS=$'\t' read -r -u 3 name repo ref path old_name; do
+        i=$((i + 1))
+        # Decode the "-" sentinels emitted by yaml_skills_tsv for empty fields.
+        [[ "$name" == "-" ]] && name=""
+        [[ "$repo" == "-" ]] && repo=""
+        [[ "$path" == "-" ]] && path=""
+        [[ "$old_name" == "-" ]] && old_name=""
 
         if [[ -z "$name" ]] || [[ -z "$repo" ]]; then
             log_warn "Skipping skill $i: missing name or repo"
@@ -218,7 +211,7 @@ update_skills() {
 
         # Handle rename migration
         if [[ -n "$old_name" ]]; then
-            migrate_old_name "$old_name" "$name"
+            migrate_old_name "$old_name"
         fi
 
         # Expand short repo format to full URL
@@ -260,12 +253,7 @@ update_skills() {
                     clone_repo "$repo" "$ref" "$target_dir"
                 else
                     log_info "  Updating existing clone..."
-                    (
-                        cd "$target_dir"
-                        git fetch --depth 1 origin "$ref"
-                        git checkout "$ref" 2>/dev/null || git checkout "origin/$ref"
-                        git pull --depth 1 --ff-only origin "$ref" 2>/dev/null || true
-                    )
+                    update_repo "$target_dir" "$ref"
                 fi
             elif [[ -d "$target_dir" ]]; then
                 log_warn "  Directory exists but is not a git repo: $target_dir"
@@ -283,7 +271,7 @@ update_skills() {
         else
             log_warn "  ⚠ No SKILL.md found in $target_dir/"
         fi
-    done
+    done 3<<<"$rows"
 
     log_info "Done. Run install script to copy skills to ~/.claude/skills/"
 }

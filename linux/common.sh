@@ -48,16 +48,14 @@ warn() {
 # APT
 #############################################################################
 
-# install_apt_package <package> [command]
-# If command is given, checks for the command instead of the package name.
-install_apt_package() {
-    local package="$1"
-    local command="${2:-$1}"
-    if ! command -v "$command" &> /dev/null; then
-        log "Installing $package..."
-        sudo apt-get install -y "$package"
-    else
-        log "$package is already installed"
+# Refresh the apt index at most once per run, lazily — called immediately
+# before an actual install. A steady-state re-run (nothing missing) never
+# pays the multi-second refresh.
+apt_update_once() {
+    if [ "${_APT_UPDATED:-}" != "1" ]; then
+        log "Refreshing apt index..."
+        sudo apt-get update -qq
+        _APT_UPDATED=1
     fi
 }
 
@@ -72,6 +70,7 @@ install_apt_packages() {
     done
 
     if [ ${#missing[@]} -gt 0 ]; then
+        apt_update_once
         log "Installing ${missing[*]}..."
         sudo apt-get install -y "${missing[@]}"
     else
@@ -144,6 +143,7 @@ install_or_upgrade_uv() {
     if ! command -v uv &> /dev/null; then
         log "Installing uv via pipx..."
         if ! command -v pipx &> /dev/null; then
+            apt_update_once
             sudo apt-get install -y -qq pipx
         fi
         pipx install uv
@@ -193,24 +193,23 @@ version_at_least() {
 # Standalone uv tools
 #############################################################################
 
+# True if uv tool <name> is installed. The single definition of this predicate
+# — install, upgrade, and uninstall paths all use it so they can't drift.
+uv_tool_installed() {
+    uv tool list 2>/dev/null | grep -qE "^${1}( |$)"
+}
+
 # Install or upgrade a uv tool with intelligent source detection.
-# Usage: install_or_upgrade_uv_tool tool_name_or_source [python_version]
+# Usage: install_or_upgrade_uv_tool tool_name_or_source
 # Examples:
 #   install_or_upgrade_uv_tool gitingest                             # PyPI package
 #   install_or_upgrade_uv_tool "git+https://github.com/user/repo"    # Git package
-#   install_or_upgrade_uv_tool toko 3.14                             # Pinned Python
 install_or_upgrade_uv_tool() {
     local tool_source="$1"
-    local python_version="${2:-}"
 
     local is_git_package=false
     if [[ "$tool_source" =~ ^git\+ ]]; then
         is_git_package=true
-    fi
-
-    local python_flag=""
-    if [ -n "$python_version" ]; then
-        python_flag="--python $python_version"
     fi
 
     # Derive tool name from source. Bash ERE doesn't support non-greedy `+?`,
@@ -224,7 +223,7 @@ install_or_upgrade_uv_tool() {
         tool_name="$tool_source"
     fi
 
-    if uv tool list 2>/dev/null | grep -q "^$tool_name "; then
+    if uv_tool_installed "$tool_name"; then
         if [ "$is_git_package" = "true" ]; then
             local tool_info=$(uv tool list --show-version-specifiers 2>/dev/null | grep "^$tool_name " || true)
             local current_git_url=$(echo "$tool_info" | grep -oP '\[required:\s+git\+\K[^\]]+' || echo "")
@@ -232,7 +231,7 @@ install_or_upgrade_uv_tool() {
 
             if [ -n "$current_git_url" ] && [ "$current_git_url" = "$new_git_url" ]; then
                 log "$tool_name is already from git source, checking for updates..."
-                uv tool upgrade $python_flag "$tool_name"
+                uv tool upgrade "$tool_name"
             else
                 if [ -n "$current_git_url" ]; then
                     log "Migrating $tool_name git source:"
@@ -242,15 +241,15 @@ install_or_upgrade_uv_tool() {
                     log "Migrating $tool_name from PyPI to git source..."
                     log "  Git: $new_git_url"
                 fi
-                uv tool install --force $python_flag "$tool_source"
+                uv tool install --force "$tool_source"
             fi
         else
             log "$tool_name is already installed, upgrading..."
-            uv tool upgrade $python_flag "$tool_name"
+            uv tool upgrade "$tool_name"
         fi
     else
         log "Installing $tool_name..."
-        uv tool install $python_flag "$tool_source"
+        uv tool install "$tool_source"
     fi
 }
 
@@ -274,8 +273,12 @@ install_go() {
         fi
     fi
 
+    # Probe the existing index first (no network): a stale index answers a
+    # version-floor check fine, and on a box where apt can't supply Go this
+    # branch runs every time — it must not pay an index refresh just to warn.
     local repo_version=$(apt-cache policy golang-go 2>/dev/null | grep -oP 'Candidate:\s*(?:[0-9]+:)?\K[0-9]+\.[0-9]+' | head -1)
     if [ -n "$repo_version" ] && version_at_least "$repo_version" "$MIN_GO_VERSION"; then
+        apt_update_once
         log "Installing Go $repo_version from apt..."
         sudo apt-get install -y golang-go
         return 0
@@ -283,6 +286,25 @@ install_go() {
         warn "Go >= $MIN_GO_VERSION not available from apt (found: ${repo_version:-none})"
         return 1
     fi
+}
+
+# Build a Go CLI from a git repo into an explicit destination binary.
+# Usage: install_go_tool_from_source <git-url> <dest-bin>
+# Clone + build run in a subshell with its own EXIT trap, so the temp-dir
+# cleanup can never clobber a caller's EXIT trap. Failures propagate as the
+# subshell's exit status (fatal under the caller's `set -e`, as before).
+install_go_tool_from_source() {
+    local repo_url="$1"
+    local dest_bin="$2"
+    mkdir -p "${dest_bin%/*}"
+    (
+        set -e
+        tmp_dir="$(mktemp -d)"
+        trap 'rm -rf "$tmp_dir"' EXIT
+        git clone --depth 1 "$repo_url" "$tmp_dir"
+        cd "$tmp_dir"
+        go build -o "$dest_bin" .
+    )
 }
 
 #############################################################################
@@ -296,6 +318,7 @@ install_blaude_repo_script() {
     local name="$1"
     local dest="$HOME/.local/bin/$name"
     local tmp
+    mkdir -p "${dest%/*}"
     tmp="$(mktemp)"
     log "Installing/updating $name..."
     if curl_secure -fsSL -H "Cache-Control: no-cache" \
@@ -394,6 +417,18 @@ do_or_dry() {
     "$@"
 }
 
+# Remove a path (file, symlink, or directory) honoring DRY_RUN, with the
+# standard warn on failure — an optional hint is appended to the warn. No-op
+# when the path doesn't exist. $HOME is shown as ~ in the log line.
+# Usage: remove_path <path> [warn-hint]
+remove_path() {
+    local path="$1" hint="${2:+ $2}"
+    if [ -e "$path" ] || [ -L "$path" ]; then
+        do_or_dry "rm -rf ${path/#$HOME/\~}" rm -rf "$path" \
+            || warn "Failed to remove $path$hint"
+    fi
+}
+
 # Prompt before uninstalling a group; auto-yes when FORCE_UNINSTALL=true.
 # Returns 0 to proceed, 1 to skip. Records skipped groups in UNINSTALL_SKIPPED.
 # Usage: if confirm_uninstall "Systemd user services"; then ...; fi
@@ -418,7 +453,7 @@ uninstall_uv_tool() {
     if ! command -v uv >/dev/null 2>&1; then
         return 0
     fi
-    if uv tool list 2>/dev/null | grep -qE "^${tool}( |$)"; then
+    if uv_tool_installed "$tool"; then
         do_or_dry "uv tool uninstall $tool" uv tool uninstall "$tool" || warn "uv tool uninstall $tool failed"
     fi
 }
